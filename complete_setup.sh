@@ -1,434 +1,113 @@
-# Display help with enhanced options
-show_help() {
-    echo "USB Sound Card Mapper - Create persistent names for USB sound devices"
-    echo
-    echo "Usage: $0 [options]"
-    echo "Options:"
-    echo "  -i, --interactive       Run in interactive mode (default)"
-    echo "  -n, --non-interactive   Run in non-interactive mode (requires all other parameters)"
-    echo "  -d, --device NAME       Device name (for logging only)"
-    echo "  -v, --vendor ID         Vendor ID (4-digit hex)"
-    echo "  -p, --product ID        Product ID (4-digit hex)"
-    echo "  -u, --usb-port PORT     USB port path (recommended for multiple identical devices)"
-    echo "  -f, --friendly NAME     Friendly name to assign"
-    echo "  -t, --test              Test USB port detection on current system"
-    echo "  -D, --debug             Enable debug output"
-    echo "  -h, --help              Show this help"
-    echo
-    echo "Examples:"
-    echo "  $0                      Run in interactive mode"
-    echo "  $0 -n -d \"MOVO X1 MINI\" -v 2e88 -p 4610 -f movo-x1-mini"
-    echo "  $0 -n -d \"MOVO X1 MINI\" -v 2e88 -p 4610 -u \"usb-3.4\" -f movo-x1-mini"
-    echo "  $0 -t                   Test USB port detection capabilities"
-    exit 0
+#!/bin/bash
+
+# MediaMTX Audio RTSP System - Installation Script
+# This script installs and configures a complete audio RTSP streaming system:
+# 1. MediaMTX RTSP server
+# 2. USB Sound Card Mapper for persistent device names
+# 3. Audio RTSP Streaming Service
+
+# Exit on error
+set -e
+
+echo "MediaMTX Audio RTSP System - Installation Script"
+echo "================================================"
+
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+  echo "This script must be run as root. Please use sudo."
+  exit 1
+fi
+
+# Create a temporary directory for downloads
+TEMP_DIR=$(mktemp -d)
+cd "$TEMP_DIR"
+
+#
+# Step 1: Install MediaMTX
+#
+echo -e "\n\033[1;34mStep 1: Installing MediaMTX RTSP Server\033[0m"
+
+# Install required packages
+echo "Installing required packages..."
+apt update && apt install -y ffmpeg curl wget grep sed alsa-utils
+
+# Function to get the latest release version
+get_latest_release() {
+  curl --silent "https://api.github.com/repos/bluenviron/mediamtx/releases/latest" | 
+  grep '"tag_name":' | 
+  sed -E 's/.*"([^"]+)".*/\1/'
 }
 
-# Main function with enhanced options
-main() {
-    # Set DEBUG to false by default
-    DEBUG="false"
-    
-    # Parse command line arguments and check for test mode
-    for arg in "$@"; do
-        case "$arg" in
-            -t|--test)
-                check_root
-                test_usb_port_detection
-                exit $?
-                ;;
-            -D|--debug)
-                DEBUG="true"
-                info "Debug mode enabled"
-                ;;
-        esac
-    done
-    
-    check_root
-    
-    # Parse command line arguments
-    if [ $# -eq 0 ]; then
-        interactive_mapping
-        exit 0
-    fi
-    
-    local device_name=""
-    local vendor_id=""
-    local product_id=""
-    local port=""
-    local friendly_name=""
-    local mode="interactive"
-    
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            -i|--interactive)
-                mode="interactive"
-                shift
-                ;;
-            -n|--non-interactive)
-                mode="non-interactive"
-                shift
-                ;;
-            -d|--device)
-                device_name="$2"
-                shift 2
-                ;;
-            -v|--vendor)
-                vendor_id="$2"
-                shift 2
-                ;;
-            -p|--product)
-                product_id="$2"
-                shift 2
-                ;;
-            -u|--usb-port)
-                port="$2"
-                shift 2
-                ;;
-            -f|--friendly)
-                friendly_name="$2"
-                shift 2
-                ;;
-            -t|--test)
-                # Already handled above
-                shift
-                ;;
-            -D|--debug)
-                # Already handled above
-                shift
-                ;;
-            -h|--help)
-                show_help
-                ;;
-            *)
-                error_exit "Unknown option: $1"
-                ;;
-        esac
-    done
-    
-    if [ "$mode" = "interactive" ]; then
-        interactive_mapping
-    else
-        non_interactive_mapping "$device_name" "$vendor_id" "$product_id" "$port" "$friendly_name"
-    fi
-}
+# Get the latest release version
+VERSION=$(get_latest_release)
+echo "Latest MediaMTX version is: $VERSION"
 
-# Run the main function
-main "$@"
+# Determine CPU architecture
+ARCH=$(uname -m)
+echo "Detected CPU architecture: $ARCH"
+
+# Map architecture to MediaMTX naming convention
+case $ARCH in
+  x86_64)
+    MTX_ARCH="amd64"
+    ;;
+  aarch64|arm64)
+    MTX_ARCH="arm64v8"
+    ;;
+  armv7*|armv7l)
+    MTX_ARCH="armv7"
+    ;;
+  armv6*|armv6l)
+    MTX_ARCH="armv6"
+    ;;
+  *)
+    echo "Unsupported architecture: $ARCH"
+    exit 1
+    ;;
+esac
+
+# Construct download URL
+DOWNLOAD_URL="https://github.com/bluenviron/mediamtx/releases/download/${VERSION}/mediamtx_${VERSION}_linux_${MTX_ARCH}.tar.gz"
+echo "Download URL: $DOWNLOAD_URL"
+
+# Download and extract
+echo "Downloading and extracting MediaMTX..."
+wget -c "$DOWNLOAD_URL" -O - | tar -xz -C /usr/local
+
+echo "MediaMTX has been installed to /usr/local/mediamtx"
+
+# Create a systemd service file for MediaMTX
+echo "Creating MediaMTX systemd service..."
+cat << EOF > /etc/systemd/system/mediamtx.service
+[Unit]
+Description=MediaMTX RTSP server
+After=network.target
+
+[Service]
+ExecStart=/usr/local/mediamtx/mediamtx
+WorkingDirectory=/usr/local/mediamtx
+Restart=always
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
-# Set permissions
-chmod +x /usr/local/bin/usb-soundcard-mapper.sh
+# Enable and start the service
+echo "Enabling MediaMTX service..."
+systemctl daemon-reload
+systemctl enable mediamtx.service
+systemctl start mediamtx.service
 
-echo "USB Sound Card Mapper installed to /usr/local/bin/usb-soundcard-mapper.sh"# Enhanced non-interactive mapping function
-non_interactive_mapping() {
-    local device_name="$1"
-    local vendor_id="$2"
-    local product_id="$3"
-    local port="$4"
-    local friendly_name="$5"
-    
-    if [ -z "$device_name" ] || [ -z "$vendor_id" ] || [ -z "$product_id" ] || [ -z "$friendly_name" ]; then
-        error_exit "Device name, vendor ID, product ID, and friendly name must be provided for non-interactive mode."
-    fi
-    
-    # Validate inputs
-    if ! [[ "$vendor_id" =~ ^[0-9a-f]{4}$ ]]; then
-        error_exit "Invalid vendor ID: $vendor_id. Must be a 4-digit hex value."
-    fi
-    
-    if ! [[ "$product_id" =~ ^[0-9a-f]{4}$ ]]; then
-        error_exit "Invalid product ID: $product_id. Must be a 4-digit hex value."
-    fi
-    
-    if ! [[ "$friendly_name" =~ ^[a-z0-9-]+$ ]]; then
-        error_exit "Invalid friendly name: $friendly_name. Use only lowercase letters, numbers, and hyphens."
-    fi
-    
-    # See if we can find the actual device in the system
-    info "Looking for device in current system..."
-    local found_card=""
-    local card_device_info=""
-    
-    # Get sound card information
-    cards_file="/proc/asound/cards"
-    if [ -f "$cards_file" ]; then
-        while IFS= read -r line; do
-            # Check if this could be our device based on name similarities
-            if [[ "$line" =~ \[$device_name|\[.*$device_name.*\] ]]; then
-                found_card="$line"
-                info "Found potential matching card: $line"
-                
-                # Try to extract USB path
-                if [[ "$line" =~ at\ (usb-[^ ,]+) ]]; then
-                    card_device_info="${BASH_REMATCH[1]}"
-                    info "Found actual USB path: $card_device_info"
-                fi
-                break
-            fi
-        done < "$cards_file"
-    fi
-    
-    # Extract a simplified port pattern for more reliable matching
-    local simple_port_pattern=""
-    if [ -n "$port" ]; then
-        # Check if port is valid
-        if is_valid_usb_path "$port"; then
-            # Extract just the basic port numbers for better matching
-            if [[ "$port" =~ ([0-9]+-[0-9]+(\.[0-9]+)*) ]]; then
-                simple_port_pattern="${BASH_REMATCH[1]}"
-                info "Extracted simple port pattern from provided port: $simple_port_pattern"
-            else
-                simple_port_pattern="$port"
-                info "Using provided port as pattern: $simple_port_pattern"
-            fi
-        else
-            warning "Provided USB port path '$port' appears invalid. Looking for alternatives."
-        fi
-    fi
-    
-    # If no valid port pattern from command line, but we found one from card info, use that
-    if [ -z "$simple_port_pattern" ] && [ -n "$card_device_info" ]; then
-        if [[ "$card_device_info" =~ (usb-[0-9]+:[0-9]+\.[0-9]+(-[0-9]+(\.[0-9]+)*)) ]]; then
-            simple_port_pattern="${BASH_REMATCH[1]}"
-            info "Using port pattern from found card: $simple_port_pattern"
-        else
-            simple_port_pattern="$card_device_info"
-            info "Using device info as port pattern: $simple_port_pattern"
-        fi
-    fi
-    
-    # Create the rule
-    info "Creating rule for $device_name..."
-    
-    rules_file="/etc/udev/rules.d/99-usb-soundcards.rules"
-    mkdir -p /etc/udev/rules.d/
-    
-    # Create uniqueness tag
-    local uniqueness_tag=$(date +%s%N | md5sum | head -c 6)
-    
-    # Create or append to rules file
-    if [ -z "$simple_port_pattern" ]; then
-        info "Creating basic rule (no reliable port information available)..."
-        echo "# USB Sound Card: $device_name" >> "$rules_file"
-        echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
-        echo "SUBSYSTEM==\"sound\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
-    else
-        info "Creating enhanced rule with port pattern: $simple_port_pattern"
-        echo "# USB Sound Card: $device_name" >> "$rules_file"
-        echo "# Port pattern: $simple_port_pattern" >> "$rules_file"
-        echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
-        echo "SUBSYSTEM==\"sound\", KERNELS==\"*${simple_port_pattern}*\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
-        
-        # If we have actual card info that's different from the port pattern, add a backup rule
-        if [ -n "$card_device_info" ] && [ "$card_device_info" != "$simple_port_pattern" ]; then
-            echo "# Backup rule using card device info" >> "$rules_file"
-            echo "SUBSYSTEM==\"sound\", KERNELS==\"*${card_device_info}*\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
-        fi
-    fi
-    
-    if [ $? -ne 0 ]; then
-        error_exit "Failed to write to $rules_file."
-    fi
-    
-    # Reload udev rules
-    reload_udev_rules
-    
-    success "Sound card mapping created successfully."
-    info "Remember to reboot for changes to take effect."
-}    # Extract a simplified port pattern for more reliable matching
-    local simple_port_pattern=""
-    if [ -n "$physical_port" ]; then
-        # First, prefer to use the card_device_info directly
-        if [ -n "$card_device_info" ]; then
-            simple_port_pattern="$card_device_info"
-            info "Using card device info for matching: $simple_port_pattern"
-        # Otherwise try to extract a simple pattern from the physical_port
-        elif [[ "$physical_port" =~ ([0-9]+-[0-9]+(\.[0-9]+)*) ]]; then
-            simple_port_pattern="${BASH_REMATCH[1]}"
-            info "Extracted simple port pattern: $simple_port_pattern"
-        else
-            simple_port_pattern="$physical_port"
-            info "Using full physical port: $simple_port_pattern"
-        fi
-    fi
-    
-    case "$rule_type" in
-        1)
-            echo "Creating basic rule..."
-            echo "# USB Sound Card: $card_name" >> "$rules_file"
-            echo "SUBSYSTEM==\"sound\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
-            ;;
-        2)
-            echo "Creating enhanced rule with port matching..."
-            # Create a uniqueness tag with timestamp to ensure truly unique identification
-            local uniqueness_tag=$(date +%s%N | md5sum | head -c 6)
-            
-            # If we have the actual card device info, create a direct matching rule first
-            if [ -n "$card_device_info" ]; then
-                echo "# USB Sound Card: $card_name" >> "$rules_file"
-                echo "# Device info: $card_device_info" >> "$rules_file"
-                echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
-                
-                # First - create a rule with the exact path as seen in cards file
-                echo "SUBSYSTEM==\"sound\", KERNELS==\"*${card_device_info}*\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
-                
-                # Next - create a rule with a more generalized pattern
-                if [[ "$card_device_info" =~ usb-[0-9a-f:.]+-([0-9]+\.[0-9]+) ]]; then
-                    local port_numbers="${BASH_REMATCH[1]}"
-                    echo "# Alternative matching rule with port numbers only" >> "$rules_file"
-                    echo "SUBSYSTEM==\"sound\", KERNELS==\"*${port_numbers}*\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
-                fi
-            elif [ -n "$simple_port_pattern" ]; then
-                # Create a rule using the simplified port pattern for better matching
-                echo "# USB Sound Card: $card_name" >> "$rules_file"
-                echo "# Port pattern: $simple_port_pattern (original: $physical_port)" >> "$rules_file"
-                echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
-                echo "SUBSYSTEM==\"sound\", KERNELS==\"*${simple_port_pattern}*\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
-            else
-                # If no reliable port information, fall back to basic rule
-                warning "No reliable port patterns available. Falling back to basic rule."
-                echo "# USB Sound Card: $card_name (no reliable port info available)" >> "$rules_file"
-                echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
-                echo "SUBSYSTEM==\"sound\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
-            fi
-            ;;
-        3)
-            echo "Creating strict rule with exact port matching..."
-            if [ -n "$card_device_info" ]; then
-                # Create a uniqueness tag with timestamp to ensure truly unique identification
-                local uniqueness_tag=$(date +%s%N | md5sum | head -c 6)
-                
-                echo "# USB Sound Card: $card_name (strict matching)" >> "$rules_file"
-                echo "# Device info: $card_device_info" >> "$rules_file"
-                echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
-                echo "SUBSYSTEM==\"sound\", KERNELS==\"${card_device_info}\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
-            elif [ -n "$simple_port_pattern" ]; then
-                # Create a uniqueness tag with timestamp to ensure truly unique identification
-                local uniqueness_tag=$(date +%s%N | md5sum | head -c 6)
-                
-                echo "# USB Sound Card: $card_name" >> "$rules_file"
-                echo "# Port pattern: $simple_port_pattern (strict matching)" >> "$rules_file"
-                echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
-                echo "SUBSYSTEM==\"sound\", KERNELS==\"${simple_port_pattern}\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
-            else
-                error_exit "Cannot create strict rule without reliable port information."
-            fi
-            ;;
-        *)
-            error_exit "Invalid rule type selection."
-            ;;
-    esac
-    
-    if [ $? -ne 0 ]; then
-        error_exit "Failed to write to $rules_file."
-    fi
-    
-    # Reload udev rules
-    reload_udev_rules
-    
-    # Prompt for reboot
-    prompt_reboot
-    
-    success "Sound card mapping created successfully."
-}    # Let user select USB device
-    echo
-    echo "Select the USB device that corresponds to this sound card:"
-    lsusb | nl -w2 -s". "
-    read usb_num
-    
-    if ! [[ "$usb_num" =~ ^[0-9]+$ ]]; then
-        error_exit "Invalid input. Please enter a number."
-    fi
-    
-    # Get the USB device line
-    usb_line=$(lsusb | sed -n "${usb_num}p")
-    if [ -z "$usb_line" ]; then
-        error_exit "No USB device found at position $usb_num."
-    fi
-    
-    # Extract vendor and product IDs
-    if [[ "$usb_line" =~ ID\ ([0-9a-f]{4}):([0-9a-f]{4}) ]]; then
-        vendor_id="${BASH_REMATCH[1]}"
-        product_id="${BASH_REMATCH[2]}"
-    else
-        error_exit "Could not extract vendor and product IDs from: $usb_line"
-    fi
-    
-    # Extract bus and device numbers for port identification
-    local physical_port=""
-    if [[ "$usb_line" =~ Bus\ ([0-9]{3})\ Device\ ([0-9]{3}) ]]; then
-        bus_num="${BASH_REMATCH[1]}"
-        dev_num="${BASH_REMATCH[2]}"
-        # Remove leading zeros
-        bus_num=$(echo "$bus_num" | sed 's/^0*//')
-        dev_num=$(echo "$dev_num" | sed 's/^0*//')
-        
-        echo "Selected USB device: $usb_line"
-        echo "Vendor ID: $vendor_id"
-        echo "Product ID: $product_id"
-        echo "Bus: $bus_num, Device: $dev_num"
-        
-        # Get physical port path - but prefer the one from card info if available
-        if [ -z "$card_device_info" ]; then
-            physical_port=$(get_usb_physical_port "$bus_num" "$dev_num")
-            if [ -n "$physical_port" ]; then
-                echo "USB physical port: $physical_port"
-            else
-                warning "Could not determine physical USB port. Using device ID only for mapping."
-                
-                # Always create a unique identifier even without port detection
-                physical_port="usb-fallback-bus${bus_num}-dev${dev_num}-${RANDOM}"
-                echo "Created fallback identifier: $physical_port"
-                
-                # Ask if user wants to continue with this fallback
-                echo
-                echo "A fallback identifier has been created for your device."
-                read -p "Continue with this identifier? (y/n): " -n 1 -r
-                echo
-                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                    error_exit "Mapping canceled."
-                fi
-            fi
-        else
-            # Use the path from card info instead - this is more reliable!
-            physical_port="$card_device_info"
-            echo "Using USB path from card info: $physical_port"
-        fi
-    else
-        warning "Could not extract bus and device numbers. This may affect rule creation."
-        # Create a fallback unique identifier
-        physical_port="usb-fallback-${RANDOM}-${RANDOM}"
-        echo "Created emergency fallback identifier: $physical_port"
-    fi
-    
-    # Get friendly name from user
-    echo
-    echo "Enter a friendly name for the sound card (lowercase letters, numbers, and hyphens only):"
-    read friendly_name
-    
-    if [ -z "$friendly_name" ]; then
-        friendly_name=$(echo "$card_name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
-        info "Using default name: $friendly_name"
-    fi
-    
-    if ! [[ "$friendly_name" =~ ^[a-z0-9-]+$ ]]; then
-        error_exit "Invalid friendly name. Use only lowercase letters, numbers, and hyphens."
-    fi
-    
-    # Check existing rules
-    check_existing_rules
-    
-    # Create the rule - offer more options with port detection
-    echo
-    echo "Ready to create udev rule. Choose rule type:"
-    echo "1. Basic rule (by vendor and product ID only)"
-    echo "2. Enhanced rule (by vendor, product ID, and USB port path) - RECOMMENDED"
-    echo "3. Strict rule (require exact match of vendor, product, and port)"
-    read rule_type
-    
-    rules_file="/etc/udev/rules.d/99-usb-soundcards.rules"
-    mkdir -p /etc/udev/rules.d/
-    # Save the USB Sound Card Mapper script
+echo "MediaMTX installation complete!"
+
+#
+# Step 2: Install USB Sound Card Mapper
+#
+echo -e "\n\033[1;34mStep 2: Installing USB Sound Card Mapper\033[0m"
+
+# Save the USB Sound Card Mapper script
 cat << 'EOF' > /usr/local/bin/usb-soundcard-mapper.sh
 #!/bin/bash
 # usb-soundcard-mapper.sh - Automatically map USB sound cards to persistent names
@@ -564,7 +243,7 @@ prompt_reboot() {
     fi
 }
 
-# NEW FUNCTION: Test if a string is valid USB path
+# Test if a string is valid USB path
 is_valid_usb_path() {
     local path="$1"
     
@@ -574,14 +253,14 @@ is_valid_usb_path() {
     fi
     
     # Check if path contains expected USB path components
-    if [[ "$path" == *"usb"* ]] && [[ "$path" == *":"* ]]; then
+    if [[ "$path" == *"usb"* ]] && [[ "$path" == *":"* || "$path" == *"-"* ]]; then
         return 0
     else
         return 1
     fi
 }
 
-# NEW FUNCTION: Get USB physical port path for a device
+# Get USB physical port path for a device
 get_usb_physical_port() {
     local bus_num="$1"
     local dev_num="$2"
@@ -792,7 +471,7 @@ get_usb_physical_port() {
     return 0
 }
 
-# NEW FUNCTION: Test USB port detection
+# Test USB port detection
 test_usb_port_detection() {
     info "Testing USB port detection..."
     
@@ -912,7 +591,7 @@ test_usb_port_detection() {
     fi
 }
 
-# Enhanced function to get more detailed card info including port path
+# Function to get detailed card info 
 get_detailed_card_info() {
     local card_num="$1"
     
@@ -1093,7 +772,125 @@ get_detailed_card_info() {
     return 1
 }
 
-# Enhanced interactive mapping function
+# Non-interactive mapping function
+non_interactive_mapping() {
+    local device_name="$1"
+    local vendor_id="$2"
+    local product_id="$3"
+    local port="$4"
+    local friendly_name="$5"
+    
+    if [ -z "$device_name" ] || [ -z "$vendor_id" ] || [ -z "$product_id" ] || [ -z "$friendly_name" ]; then
+        error_exit "Device name, vendor ID, product ID, and friendly name must be provided for non-interactive mode."
+    fi
+    
+    # Validate inputs
+    if ! [[ "$vendor_id" =~ ^[0-9a-f]{4}$ ]]; then
+        error_exit "Invalid vendor ID: $vendor_id. Must be a 4-digit hex value."
+    fi
+    
+    if ! [[ "$product_id" =~ ^[0-9a-f]{4}$ ]]; then
+        error_exit "Invalid product ID: $product_id. Must be a 4-digit hex value."
+    fi
+    
+    if ! [[ "$friendly_name" =~ ^[a-z0-9-]+$ ]]; then
+        error_exit "Invalid friendly name: $friendly_name. Use only lowercase letters, numbers, and hyphens."
+    fi
+    
+    # See if we can find the actual device in the system
+    info "Looking for device in current system..."
+    local found_card=""
+    local card_device_info=""
+    
+    # Get sound card information
+    cards_file="/proc/asound/cards"
+    if [ -f "$cards_file" ]; then
+        while IFS= read -r line; do
+            # Check if this could be our device based on name
+            if [[ "$line" =~ \[.*$device_name.*\] ]]; then
+                found_card="$line"
+                info "Found potential matching card: $line"
+                
+                # Try to extract USB path
+                if [[ "$line" =~ at\ (usb-[^ ,]+) ]]; then
+                    card_device_info="${BASH_REMATCH[1]}"
+                    info "Found actual USB path: $card_device_info"
+                fi
+                break
+            fi
+        done < "$cards_file"
+    fi
+    
+    # Extract a simplified port pattern for more reliable matching
+    local simple_port_pattern=""
+    if [ -n "$port" ]; then
+        # Check if port is valid
+        if is_valid_usb_path "$port"; then
+            # Extract just the basic port numbers for better matching
+            if [[ "$port" =~ ([0-9]+-[0-9]+(\.[0-9]+)*) ]]; then
+                simple_port_pattern="${BASH_REMATCH[1]}"
+                info "Extracted simple port pattern from provided port: $simple_port_pattern"
+            else
+                simple_port_pattern="$port"
+                info "Using provided port as pattern: $simple_port_pattern"
+            fi
+        else
+            warning "Provided USB port path '$port' appears invalid. Looking for alternatives."
+        fi
+    fi
+    
+    # If no valid port pattern from command line, but we found one from card info, use that
+    if [ -z "$simple_port_pattern" ] && [ -n "$card_device_info" ]; then
+        if [[ "$card_device_info" =~ (usb-[0-9]+:[0-9]+\.[0-9]+(-[0-9]+(\.[0-9]+)*)) ]]; then
+            simple_port_pattern="${BASH_REMATCH[1]}"
+            info "Using port pattern from found card: $simple_port_pattern"
+        else
+            simple_port_pattern="$card_device_info"
+            info "Using device info as port pattern: $simple_port_pattern"
+        fi
+    fi
+    
+    # Create the rule
+    info "Creating rule for $device_name..."
+    
+    rules_file="/etc/udev/rules.d/99-usb-soundcards.rules"
+    mkdir -p /etc/udev/rules.d/
+    
+    # Create uniqueness tag
+    local uniqueness_tag=$(date +%s%N | md5sum | head -c 6)
+    
+    # Create or append to rules file
+    if [ -z "$simple_port_pattern" ]; then
+        info "Creating basic rule (no reliable port information available)..."
+        echo "# USB Sound Card: $device_name" >> "$rules_file"
+        echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
+        echo "SUBSYSTEM==\"sound\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
+    else
+        info "Creating enhanced rule with port pattern: $simple_port_pattern"
+        echo "# USB Sound Card: $device_name" >> "$rules_file"
+        echo "# Port pattern: $simple_port_pattern" >> "$rules_file"
+        echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
+        echo "SUBSYSTEM==\"sound\", KERNELS==\"*${simple_port_pattern}*\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
+        
+        # If we have actual card info that's different from the port pattern, add a backup rule
+        if [ -n "$card_device_info" ] && [ "$card_device_info" != "$simple_port_pattern" ]; then
+            echo "# Backup rule using card device info" >> "$rules_file"
+            echo "SUBSYSTEM==\"sound\", KERNELS==\"*${card_device_info}*\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
+        fi
+    fi
+    
+    if [ $? -ne 0 ]; then
+        error_exit "Failed to write to $rules_file."
+    fi
+    
+    # Reload udev rules
+    reload_udev_rules
+    
+    success "Sound card mapping created successfully."
+    info "Remember to reboot for changes to take effect."
+}
+
+# Interactive mapping function
 interactive_mapping() {
     echo -e "\e[1m===== USB Sound Card Mapper =====\e[0m"
     echo "This wizard will guide you through mapping your USB sound card to a consistent name."
@@ -1142,134 +939,324 @@ interactive_mapping() {
     
     # Try to get detailed card info including USB device path
     get_detailed_card_info "$card_num"
-    #!/bin/bash
-
-# Complete installation script for MediaMTX Audio RTSP System
-# This script installs and configures the entire system:
-# 1. MediaMTX RTSP server
-# 2. USB Sound Card Mapper
-# 3. Audio RTSP Streaming Service
-
-# Exit on error
-set -e
-
-echo "MediaMTX Audio RTSP System - Installation Script"
-echo "================================================"
-
-# Check if running as root
-if [ "$EUID" -ne 0 ]; then
-  echo "This script must be run as root. Please use sudo."
-  exit 1
-fi
-
-# Create a temporary directory for downloads
-TEMP_DIR=$(mktemp -d)
-cd "$TEMP_DIR"
-
-#
-# Step 1: Install MediaMTX
-#
-echo -e "\n\033[1;34mStep 1: Installing MediaMTX RTSP Server\033[0m"
-
-# Install required packages
-echo "Installing required packages..."
-apt update && apt install -y ffmpeg curl wget grep sed
-
-# Function to get the latest release version
-get_latest_release() {
-  curl --silent "https://api.github.com/repos/bluenviron/mediamtx/releases/latest" | 
-  grep '"tag_name":' | 
-  sed -E 's/.*"([^"]+)".*/\1/'
+    
+    # Let user select USB device
+    echo
+    echo "Select the USB device that corresponds to this sound card:"
+    lsusb | nl -w2 -s". "
+    read usb_num
+    
+    if ! [[ "$usb_num" =~ ^[0-9]+$ ]]; then
+        error_exit "Invalid input. Please enter a number."
+    fi
+    
+    # Get the USB device line
+    usb_line=$(lsusb | sed -n "${usb_num}p")
+    if [ -z "$usb_line" ]; then
+        error_exit "No USB device found at position $usb_num."
+    fi
+    
+    # Extract vendor and product IDs
+    if [[ "$usb_line" =~ ID\ ([0-9a-f]{4}):([0-9a-f]{4}) ]]; then
+        vendor_id="${BASH_REMATCH[1]}"
+        product_id="${BASH_REMATCH[2]}"
+    else
+        error_exit "Could not extract vendor and product IDs from: $usb_line"
+    fi
+    
+    # Extract bus and device numbers for port identification
+    local physical_port=""
+    if [[ "$usb_line" =~ Bus\ ([0-9]{3})\ Device\ ([0-9]{3}) ]]; then
+        bus_num="${BASH_REMATCH[1]}"
+        dev_num="${BASH_REMATCH[2]}"
+        # Remove leading zeros
+        bus_num=$(echo "$bus_num" | sed 's/^0*//')
+        dev_num=$(echo "$dev_num" | sed 's/^0*//')
+        
+        echo "Selected USB device: $usb_line"
+        echo "Vendor ID: $vendor_id"
+        echo "Product ID: $product_id"
+        echo "Bus: $bus_num, Device: $dev_num"
+        
+        # Get physical port path - but prefer the one from card info if available
+        if [ -z "$card_device_info" ]; then
+            physical_port=$(get_usb_physical_port "$bus_num" "$dev_num")
+            if [ -n "$physical_port" ]; then
+                echo "USB physical port: $physical_port"
+            else
+                warning "Could not determine physical USB port. Using device ID only for mapping."
+                
+                # Always create a unique identifier even without port detection
+                physical_port="usb-fallback-bus${bus_num}-dev${dev_num}-${RANDOM}"
+                echo "Created fallback identifier: $physical_port"
+                
+                # Ask if user wants to continue with this fallback
+                echo
+                echo "A fallback identifier has been created for your device."
+                read -p "Continue with this identifier? (y/n): " -n 1 -r
+                echo
+                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                    error_exit "Mapping canceled."
+                fi
+            fi
+        else
+            # Use the path from card info instead - this is more reliable!
+            physical_port="$card_device_info"
+            echo "Using USB path from card info: $physical_port"
+        fi
+    else
+        warning "Could not extract bus and device numbers. This may affect rule creation."
+        # Create a fallback unique identifier
+        physical_port="usb-fallback-${RANDOM}-${RANDOM}"
+        echo "Created emergency fallback identifier: $physical_port"
+    fi
+    
+    # Get friendly name from user
+    echo
+    echo "Enter a friendly name for the sound card (lowercase letters, numbers, and hyphens only):"
+    read friendly_name
+    
+    if [ -z "$friendly_name" ]; then
+        friendly_name=$(echo "$card_name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+        info "Using default name: $friendly_name"
+    fi
+    
+    if ! [[ "$friendly_name" =~ ^[a-z0-9-]+$ ]]; then
+        error_exit "Invalid friendly name. Use only lowercase letters, numbers, and hyphens."
+    fi
+    
+    # Check existing rules
+    check_existing_rules
+    
+    # Create the rule - offer more options with port detection
+    echo
+    echo "Ready to create udev rule. Choose rule type:"
+    echo "1. Basic rule (by vendor and product ID only)"
+    echo "2. Enhanced rule (by vendor, product ID, and USB port path) - RECOMMENDED"
+    echo "3. Strict rule (require exact match of vendor, product, and port)"
+    read rule_type
+    
+    rules_file="/etc/udev/rules.d/99-usb-soundcards.rules"
+    mkdir -p /etc/udev/rules.d/
+    
+    # Create uniqueness tag with timestamp to ensure truly unique identification
+    local uniqueness_tag=$(date +%s%N | md5sum | head -c 6)
+    
+    case "$rule_type" in
+        1)
+            echo "Creating basic rule..."
+            echo "# USB Sound Card: $card_name" >> "$rules_file"
+            echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
+            echo "SUBSYSTEM==\"sound\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
+            ;;
+        2)
+            echo "Creating enhanced rule with port matching..."
+            
+            # If we have the actual card device info, create a direct matching rule first
+            if [ -n "$card_device_info" ]; then
+                echo "# USB Sound Card: $card_name" >> "$rules_file"
+                echo "# Device info: $card_device_info" >> "$rules_file"
+                echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
+                
+                # First - create a rule with the exact path as seen in cards file
+                echo "SUBSYSTEM==\"sound\", KERNELS==\"*${card_device_info}*\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
+                
+                # Next - create a rule with a more generalized pattern
+                if [[ "$card_device_info" =~ usb-[0-9a-f:.]+-([0-9]+\.[0-9]+) ]]; then
+                    local port_numbers="${BASH_REMATCH[1]}"
+                    echo "# Alternative matching rule with port numbers only" >> "$rules_file"
+                    echo "SUBSYSTEM==\"sound\", KERNELS==\"*${port_numbers}*\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
+                fi
+            elif [ -n "$physical_port" ]; then
+                # Extract a simplified port pattern for better matching
+                local simple_port_pattern=""
+                
+                if [[ "$physical_port" =~ ([0-9]+-[0-9]+(\.[0-9]+)*) ]]; then
+                    simple_port_pattern="${BASH_REMATCH[1]}"
+                    info "Extracted simple port pattern: $simple_port_pattern"
+                else
+                    simple_port_pattern="$physical_port"
+                    info "Using full physical port: $simple_port_pattern"
+                fi
+                
+                # Create a rule using the simplified port pattern for better matching
+                echo "# USB Sound Card: $card_name" >> "$rules_file"
+                echo "# Port pattern: $simple_port_pattern (original: $physical_port)" >> "$rules_file"
+                echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
+                echo "SUBSYSTEM==\"sound\", KERNELS==\"*${simple_port_pattern}*\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
+            else
+                # If no reliable port information, fall back to basic rule
+                warning "No reliable port patterns available. Falling back to basic rule."
+                echo "# USB Sound Card: $card_name (no reliable port info available)" >> "$rules_file"
+                echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
+                echo "SUBSYSTEM==\"sound\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
+            fi
+            ;;
+        3)
+            echo "Creating strict rule with exact port matching..."
+            if [ -n "$card_device_info" ]; then
+                echo "# USB Sound Card: $card_name (strict matching)" >> "$rules_file"
+                echo "# Device info: $card_device_info" >> "$rules_file"
+                echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
+                echo "SUBSYSTEM==\"sound\", KERNELS==\"${card_device_info}\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
+            elif [ -n "$physical_port" ]; then
+                # Extract a simplified port pattern for better matching
+                local simple_port_pattern=""
+                
+                if [[ "$physical_port" =~ ([0-9]+-[0-9]+(\.[0-9]+)*) ]]; then
+                    simple_port_pattern="${BASH_REMATCH[1]}"
+                else
+                    simple_port_pattern="$physical_port"
+                fi
+                
+                echo "# USB Sound Card: $card_name" >> "$rules_file"
+                echo "# Port pattern: $simple_port_pattern (strict matching)" >> "$rules_file"
+                echo "# Uniqueness tag: $uniqueness_tag" >> "$rules_file"
+                echo "SUBSYSTEM==\"sound\", KERNELS==\"${simple_port_pattern}\", ATTRS{idVendor}==\"$vendor_id\", ATTRS{idProduct}==\"$product_id\", ATTR{id}=\"$friendly_name\"" >> "$rules_file"
+            else
+                error_exit "Cannot create strict rule without reliable port information."
+            fi
+            ;;
+        *)
+            error_exit "Invalid rule type selection."
+            ;;
+    esac
+    
+    if [ $? -ne 0 ]; then
+        error_exit "Failed to write to $rules_file."
+    fi
+    
+    # Reload udev rules
+    reload_udev_rules
+    
+    # Prompt for reboot
+    prompt_reboot
+    
+    success "Sound card mapping created successfully."
 }
 
-# Get the latest release version
-VERSION=$(get_latest_release)
-echo "Latest MediaMTX version is: $VERSION"
+# Display help with enhanced options
+show_help() {
+    echo "USB Sound Card Mapper - Create persistent names for USB sound devices"
+    echo
+    echo "Usage: $0 [options]"
+    echo "Options:"
+    echo "  -i, --interactive       Run in interactive mode (default)"
+    echo "  -n, --non-interactive   Run in non-interactive mode (requires all other parameters)"
+    echo "  -d, --device NAME       Device name (for logging only)"
+    echo "  -v, --vendor ID         Vendor ID (4-digit hex)"
+    echo "  -p, --product ID        Product ID (4-digit hex)"
+    echo "  -u, --usb-port PORT     USB port path (recommended for multiple identical devices)"
+    echo "  -f, --friendly NAME     Friendly name to assign"
+    echo "  -t, --test              Test USB port detection on current system"
+    echo "  -D, --debug             Enable debug output"
+    echo "  -h, --help              Show this help"
+    echo
+    echo "Examples:"
+    echo "  $0                      Run in interactive mode"
+    echo "  $0 -n -d \"MOVO X1 MINI\" -v 2e88 -p 4610 -f movo-x1-mini"
+    echo "  $0 -n -d \"MOVO X1 MINI\" -v 2e88 -p 4610 -u \"usb-3.4\" -f movo-x1-mini"
+    echo "  $0 -t                   Test USB port detection capabilities"
+    exit 0
+}
 
-# Determine CPU architecture
-ARCH=$(uname -m)
-echo "Detected CPU architecture: $ARCH"
+# Main function with enhanced options
+main() {
+    # Set DEBUG to false by default
+    DEBUG="false"
+    
+    # Parse command line arguments and check for test mode
+    for arg in "$@"; do
+        case "$arg" in
+            -t|--test)
+                check_root
+                test_usb_port_detection
+                exit $?
+                ;;
+            -D|--debug)
+                DEBUG="true"
+                info "Debug mode enabled"
+                ;;
+        esac
+    done
+    
+    check_root
+    
+    # Parse command line arguments
+    if [ $# -eq 0 ]; then
+        interactive_mapping
+        exit 0
+    fi
+    
+    local device_name=""
+    local vendor_id=""
+    local product_id=""
+    local port=""
+    local friendly_name=""
+    local mode="interactive"
+    
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -i|--interactive)
+                mode="interactive"
+                shift
+                ;;
+            -n|--non-interactive)
+                mode="non-interactive"
+                shift
+                ;;
+            -d|--device)
+                device_name="$2"
+                shift 2
+                ;;
+            -v|--vendor)
+                vendor_id="$2"
+                shift 2
+                ;;
+            -p|--product)
+                product_id="$2"
+                shift 2
+                ;;
+            -u|--usb-port)
+                port="$2"
+                shift 2
+                ;;
+            -f|--friendly)
+                friendly_name="$2"
+                shift 2
+                ;;
+            -t|--test)
+                # Already handled above
+                shift
+                ;;
+            -D|--debug)
+                # Already handled above
+                shift
+                ;;
+            -h|--help)
+                show_help
+                ;;
+            *)
+                error_exit "Unknown option: $1"
+                ;;
+        esac
+    done
+    
+    if [ "$mode" = "interactive" ]; then
+        interactive_mapping
+    else
+        non_interactive_mapping "$device_name" "$vendor_id" "$product_id" "$port" "$friendly_name"
+    fi
+}
 
-# Map architecture to MediaMTX naming convention
-case $ARCH in
-  x86_64)
-    MTX_ARCH="amd64"
-    ;;
-  aarch64|arm64)
-    MTX_ARCH="arm64v8"
-    ;;
-  armv6*|armv6l)
-    MTX_ARCH="armv6"
-    ;;
-  *)
-    echo "Unsupported architecture: $ARCH"
-    exit 1
-    ;;
-esac
-
-# Construct download URL
-DOWNLOAD_URL="https://github.com/bluenviron/mediamtx/releases/download/${VERSION}/mediamtx_${VERSION}_linux_${MTX_ARCH}.tar.gz"
-echo "Download URL: $DOWNLOAD_URL"
-
-# Download and extract
-echo "Downloading and extracting MediaMTX..."
-wget -c "$DOWNLOAD_URL" -O - | tar -xz -C /usr/local
-
-echo "MediaMTX has been installed to /usr/local/mediamtx"
-
-# Create a systemd service file for MediaMTX
-echo "Creating MediaMTX systemd service..."
-cat << EOF > /etc/systemd/system/mediamtx.service
-[Unit]
-Description=MediaMTX RTSP server
-After=network.target
-
-[Service]
-ExecStart=/usr/local/mediamtx/mediamtx
-WorkingDirectory=/usr/local/mediamtx
-Restart=always
-RestartSec=10
-User=root
-
-[Install]
-WantedBy=multi-user.target
+# Run the main function
+main "$@"
 EOF
-
-# Enable and start the service
-echo "Enabling MediaMTX service..."
-systemctl daemon-reload
-systemctl enable mediamtx.service
-systemctl start mediamtx.service
-
-echo "MediaMTX installation complete!"
-
-#
-# Step 2: Install USB Sound Card Mapper
-#
-echo -e "\n\033[1;34mStep 2: Installing USB Sound Card Mapper\033[0m"
-
-# Save the USB Sound Card Mapper script
-cat << 'EOF' > /usr/local/bin/usb-soundcard-mapper.sh
-#!/bin/bash
-# usb-soundcard-mapper.sh - Automatically map USB sound cards to persistent names
-#
-# This script automates the process of creating udev rules for USB sound cards
-# to ensure they maintain consistent names across reboots.
-
-# SCRIPT CONTENT WOULD BE INSERTED HERE
-# The entire script would be included here, but abbreviated for example
-EOF
-
-# Insert the actual script content here - this is a placeholder reference
-# Full script would need to be inserted here
 
 # Set permissions
 chmod +x /usr/local/bin/usb-soundcard-mapper.sh
 
 echo "USB Sound Card Mapper installed to /usr/local/bin/usb-soundcard-mapper.sh"
-
-# Create a symlink for backwards compatibility if needed
-ln -sf /usr/local/bin/usb-soundcard-mapper.sh /usr/local/bin/map-usb-audio.sh
 
 #
 # Step 3: Create the Audio RTSP Streaming Script
@@ -1291,13 +1278,11 @@ if systemctl is-active --quiet audio-rtsp.service; then
     echo "----------------------------------------"
 fi
 
-echo "Starting MediaMTX RTSP server..."
-# Check if MediaMTX is already running
-if pgrep mediamtx > /dev/null; then
-    echo "MediaMTX is already running."
-else
-    # Start MediaMTX in the background
-    /usr/local/mediamtx/mediamtx &
+echo "Checking MediaMTX RTSP server..."
+# Don't try to start MediaMTX manually - it should be running as a systemd service
+if ! systemctl is-active --quiet mediamtx.service; then
+    echo "WARNING: MediaMTX service is not running. Trying to start it..."
+    systemctl start mediamtx.service
     echo "Waiting for MediaMTX to initialize..."
     sleep 3  # Allow MediaMTX time to start properly
 fi
@@ -1305,11 +1290,46 @@ fi
 # Function to check if a sound card has a capture device
 has_capture_device() {
     local card=$1
+    local card_id=$2
+    
+    # First try with arecord -l
     if arecord -l | grep -q "card $card"; then
         return 0  # Has capture device
-    else
-        return 1  # No capture device
     fi
+    
+    # If that fails, try with card ID
+    if [ -n "$card_id" ] && arecord -l | grep -q "$card_id"; then
+        return 0  # Has capture device
+    fi
+    
+    # Last resort, check if there's a pcm*c directory (capture device)
+    if [ -d "/proc/asound/card$card/pcm0c" ] || ls -d /proc/asound/card$card/pcm*c 2>/dev/null; then
+        return 0  # Has capture device directory
+    fi
+    
+    return 1  # No capture device
+}
+
+# Function to detect the capture device number
+get_capture_device() {
+    local card=$1
+    local card_id=$2
+    
+    # Default to device 0 if we can't determine
+    local device=0
+    
+    # Look through the pcm*c directories to find the first capture device
+    for pcm_dir in /proc/asound/card$card/pcm*c; do
+        if [ -d "$pcm_dir" ]; then
+            # Extract the number from pcm*c
+            if [[ "$pcm_dir" =~ pcm([0-9]+)c ]]; then
+                device="${BASH_REMATCH[1]}"
+                break
+            fi
+        fi
+    done
+    
+    echo "$device"
 }
 
 # Function to get a sanitized name for the RTSP stream
@@ -1319,19 +1339,19 @@ get_stream_name() {
     echo "$card_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g'
 }
 
-# Kill any existing ffmpeg processes
-echo "Stopping any existing ffmpeg streams..."
-pkill -f ffmpeg || true
+# Kill any existing streaming ffmpeg processes (only those we started for RTSP streaming)
+echo "Stopping any existing audio RTSP streams..."
+pkill -f "ffmpeg.*rtsp://" || true
 sleep 1
 
 # Get list of sound cards
 echo "Detecting sound cards with capture capabilities..."
 SOUND_CARDS=$(cat /proc/asound/cards)
 
-# Create an associative array to store device details
-declare -A STREAM_DETAILS
+# Create a temporary file to store stream details
+STREAM_DETAILS_FILE=$(mktemp)
 
-# Parse sound cards and start ffmpeg for each one with capture capability
+# Process each sound card
 echo "$SOUND_CARDS" | while read -r line; do
     if [[ "$line" =~ ^[[:space:]]*([0-9]+)[[:space:]]*\[([^]]+)\][[:space:]]*:[[:space:]]*(.*) ]]; then
         CARD_NUM=${BASH_REMATCH[1]}
@@ -1343,8 +1363,8 @@ echo "$SOUND_CARDS" | while read -r line; do
         
         # Extract USB device info if available
         USB_INFO=""
-        if [[ "$CARD_DESC" =~ USB-Audio ]]; then
-            USB_INFO=$(echo "$CARD_DESC" | sed -n 's/.*USB-Audio - \(.*\)/\1/p')
+        if [[ "$CARD_DESC" =~ USB ]]; then
+            USB_INFO=$(echo "$CARD_DESC" | sed 's/.*- \(.*\)/\1/' | xargs)
         fi
         
         # Exclude known system sound devices that shouldn't be used for capture
@@ -1354,21 +1374,25 @@ echo "$SOUND_CARDS" | while read -r line; do
         fi
         
         # Check if this card has capture capabilities
-        if has_capture_device "$CARD_NUM"; then
+        if has_capture_device "$CARD_NUM" "$CARD_ID"; then
+            # Get the appropriate capture device number
+            CAPTURE_DEV=$(get_capture_device "$CARD_NUM" "$CARD_ID")
+            
             # Generate stream name based on card ID
             STREAM_NAME=$(get_stream_name "$CARD_ID")
             RTSP_URL="rtsp://localhost:8554/$STREAM_NAME"
             
-            echo "Starting RTSP stream for card $CARD_NUM [$CARD_ID]: $RTSP_URL"
+            echo "Starting RTSP stream for card $CARD_NUM [$CARD_ID] device $CAPTURE_DEV: $RTSP_URL"
             
-            # Save the details to our array
-            # Use a delimiter that's unlikely to appear in the names
-            echo "$CARD_NUM|$CARD_ID|$USB_INFO|$RTSP_URL" >> /tmp/stream_details.$$
+            # Save the details to our file
+            echo "$CARD_NUM|$CARD_ID|$USB_INFO|$RTSP_URL|$CAPTURE_DEV" >> "$STREAM_DETAILS_FILE"
             
-            # Start ffmpeg with the appropriate sound card
-            ffmpeg -nostdin -f alsa -ac 1 -i "plughw:CARD=$CARD_ID,DEV=0" \
+            # Start ffmpeg with the appropriate sound card and capture device
+            # Using unique identifiable command so we can selectively kill these processes
+            ffmpeg -nostdin -hide_banner -loglevel warning \
+                  -f alsa -ac 1 -i "plughw:CARD=$CARD_ID,DEV=$CAPTURE_DEV" \
                   -acodec libmp3lame -b:a 160k -ac 2 -content_type 'audio/mpeg' \
-                  -f rtsp "$RTSP_URL" -rtsp_transport tcp &
+                  -f rtsp -rtsp_transport tcp "$RTSP_URL" &
             
             # Small delay to stagger the ffmpeg starts
             sleep 0.5
@@ -1379,18 +1403,18 @@ echo "$SOUND_CARDS" | while read -r line; do
 done
 
 # Check if any streams were created
-if [ -f /tmp/stream_details.$$ ]; then
+if [ -s "$STREAM_DETAILS_FILE" ]; then
     echo ""
     echo "================================================================="
     echo "                  ACTIVE AUDIO RTSP STREAMS                      "
     echo "================================================================="
-    printf "%-4s | %-15s | %-30s | %s\n" "Card" "Card ID" "USB Device" "RTSP URL"
+    printf "%-4s | %-15s | %-30s | %-5s | %s\n" "Card" "Card ID" "USB Device" "Dev" "RTSP URL"
     echo "-----------------------------------------------------------------"
     
     # Print a formatted table of the streams
-    while IFS="|" read -r card_num card_id usb_info rtsp_url; do
-        printf "%-4s | %-15s | %-30s | %s\n" "$card_num" "$card_id" "$usb_info" "$rtsp_url"
-    done < /tmp/stream_details.$$
+    while IFS="|" read -r card_num card_id usb_info rtsp_url capture_dev; do
+        printf "%-4s | %-15s | %-30s | %-5s | %s\n" "$card_num" "$card_id" "$usb_info" "$capture_dev" "$rtsp_url"
+    done < "$STREAM_DETAILS_FILE"
     
     echo "================================================================="
     echo ""
@@ -1402,11 +1426,18 @@ if [ -f /tmp/stream_details.$$ ]; then
         echo "'localhost' with '$IP_ADDR' in the RTSP URLs"
         echo ""
     fi
-    
-    # Clean up the temporary file
-    rm /tmp/stream_details.$$
 else
     echo "No audio streams were created. Check if you have audio capture devices connected."
+fi
+
+# Clean up the temporary file
+rm -f "$STREAM_DETAILS_FILE"
+
+# Keep the script running to maintain the ffmpeg processes
+echo "Audio RTSP streams are now running. Press Ctrl+C to stop."
+if ! systemctl is-active --quiet audio-rtsp.service; then
+    # Only wait if not running as a service
+    wait
 fi
 EOF
 
@@ -1535,7 +1566,9 @@ echo
 echo "To check the status of your audio streams:"
 echo "  sudo check-audio-rtsp.sh"
 echo
-echo "For issues and troubleshooting, check the README.md"
+echo "For issues and troubleshooting, check the logs:"
+echo "  - MediaMTX logs: journalctl -u mediamtx.service"
+echo "  - Audio RTSP logs: cat /var/log/audio-rtsp/audio-streams.log"
 
 # Clean up
 cd /
