@@ -50,9 +50,24 @@ jobs:
             echo "Running Bashate on shell scripts"
             find . -type f -name "*.sh" -exec bash -c 'bashate "$1" 2>&1 || true' _ {} \; > validation-results/bashate.txt
             
-            # Run Shellharden with error handling
+            # Run Shellharden with proper output handling
             echo "Running Shellharden on shell scripts"
-            find . -type f -name "*.sh" -exec bash -c 'shellharden --check "$1" 2>&1 || true' _ {} \; > validation-results/shellharden.txt
+            # First create an empty file
+            > validation-results/shellharden.txt
+            
+            # Process each shell script separately to capture Shellharden output
+            find . -type f -name "*.sh" | while read -r script; do
+              echo "Analyzing $script with Shellharden..."
+              # Shellharden returns non-zero exit code if would be rewritten
+              shellharden --check "$script" > /tmp/shellharden_output.txt 2>&1 || true
+              
+              # If output has any content, it found issues
+              if grep -q "would be rewritten" /tmp/shellharden_output.txt; then
+                echo "Issues found in: $script" >> validation-results/shellharden.txt
+                cat /tmp/shellharden_output.txt >> validation-results/shellharden.txt
+                echo "-----------------------" >> validation-results/shellharden.txt
+              fi
+            done
           fi
       
       - name: Generate unified report
@@ -104,8 +119,15 @@ jobs:
           
           # Count Shellharden issues with error handling
           if [ -f validation-results/shellharden.txt ]; then
+            # Count files with issues rather than lines
             MATCHES=$(grep -c "would be rewritten" validation-results/shellharden.txt 2>/dev/null) || MATCHES=0
             SHELLHARDEN_COUNT=${MATCHES:-0}
+            
+            # Alternative count method in case the pattern is different
+            if [ "$SHELLHARDEN_COUNT" -eq 0 ]; then
+              MATCHES=$(grep -c "Issues found in:" validation-results/shellharden.txt 2>/dev/null) || MATCHES=0
+              SHELLHARDEN_COUNT=${MATCHES:-0}
+            fi
           fi
           
           # Calculate totals safely
@@ -117,7 +139,7 @@ jobs:
           echo "Issue counts:"
           echo "- ShellCheck: $SHELLCHECK_COUNT ($SHELLCHECK_ERROR errors, $SHELLCHECK_WARNING warnings, $SHELLCHECK_INFO info)"
           echo "- Bashate: $BASHATE_COUNT ($BASHATE_ERROR errors, $BASHATE_WARNING warnings)"
-          echo "- Shellharden: $SHELLHARDEN_COUNT issues"
+          echo "- Shellharden: $SHELLHARDEN_COUNT quoting issues" 
           echo "- Total: $TOTAL_ISSUES ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)"
           
           # Create HTML report - write to file line by line to avoid YAML syntax issues
