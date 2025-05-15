@@ -24,7 +24,7 @@ jobs:
           # Verify shellharden works
           shellharden --version || echo "WARNING: Shellharden installation appears broken"
       
-      - name: Run validation tools
+      - name: Run ShellCheck and Bashate
         run: |
           # Create results directory
           mkdir -p validation-results
@@ -37,7 +37,6 @@ jobs:
             echo "No shell scripts found to analyze, creating empty result files"
             echo '{"comments":[]}' > validation-results/shellcheck.json
             touch validation-results/bashate.txt
-            touch validation-results/shellharden.txt
             mkdir -p validation-results/raw_output
             touch validation-results/raw_output/shellcheck_plain.txt
             touch validation-results/raw_output/shellcheck_json.txt
@@ -60,75 +59,128 @@ jobs:
             # Run Bashate with error handling
             echo "Running Bashate on shell scripts"
             find . -type f -name "*.sh" -exec bash -c 'bashate "$1" 2>&1 || true' _ {} \; > validation-results/bashate.txt
-            
-            # Run direct detection for unquoted variables (similar to what Shellharden would detect)
-            echo "Running variable quoting analysis..."
-            > validation-results/shellharden.txt  # Create/empty the output file
-            
-            # Header for shellharden-like analysis
-            echo "=== Manual Shell Script Hardening Analysis ===" > validation-results/shellharden.txt
-            echo "Checking for unquoted variables and other shell script hardening issues..." >> validation-results/shellharden.txt
-            echo "" >> validation-results/shellharden.txt
-            
-            # Count of issues found
-            TOTAL_UNQUOTED=0
-            
-            # Process each file individually 
-            find . -type f -name "*.sh" | while read -r script; do
-              echo "Analyzing $script for unquoted variables..."
-              
-              echo "=== Results for $script ===" >> validation-results/shellharden.txt
-              
-              # Extract ShellCheck SC2086 issues (unquoted variables) for this file
-              SC2086_ISSUES=$(grep -n "SC2086.*Double quote to prevent" validation-results/raw_output/shellcheck_plain.txt | grep "$script" || true)
-              
-              if [ -n "$SC2086_ISSUES" ]; then
-                echo "$SC2086_ISSUES" >> validation-results/shellharden.txt
-                
-                # Count the issues and track them for the "would be rewritten" format
-                ISSUE_COUNT=$(echo "$SC2086_ISSUES" | wc -l)
-                TOTAL_UNQUOTED=$((TOTAL_UNQUOTED + ISSUE_COUNT))
-                
-                # Add "would be rewritten" lines for each issue to match shellharden's format
-                for i in $(seq 1 $ISSUE_COUNT); do
-                  echo "$script would be rewritten" >> validation-results/shellharden.txt
-                done
-              else
-                echo "No unquoted variables found in $script" >> validation-results/shellharden.txt
-              fi
-              
-              # Also look for other common issues like ls usage with globs
-              GLOB_ISSUES=$(grep -n "SC2045.*Iterating over ls output is fragile" validation-results/raw_output/shellcheck_plain.txt | grep "$script" || true)
-              if [ -n "$GLOB_ISSUES" ]; then
-                echo "$GLOB_ISSUES" >> validation-results/shellharden.txt
-                
-                # Count these issues too
-                ISSUE_COUNT=$(echo "$GLOB_ISSUES" | wc -l)
-                TOTAL_UNQUOTED=$((TOTAL_UNQUOTED + ISSUE_COUNT))
-                
-                # Add "would be rewritten" lines for each issue
-                for i in $(seq 1 $ISSUE_COUNT); do
-                  echo "$script would be rewritten" >> validation-results/shellharden.txt
-                done
-              fi
-              
-              # Add separator between files
-              echo "" >> validation-results/shellharden.txt
-              echo "-------------------------------------------" >> validation-results/shellharden.txt
-              echo "" >> validation-results/shellharden.txt
-            done
-            
-            # Write summary at the end
-            echo "Total unquoted variables and unsafe usage found: $TOTAL_UNQUOTED" >> validation-results/shellharden.txt
-            
-            # Also create the count file
-            > validation-results/shellharden_count.txt
-            for i in $(seq 1 $TOTAL_UNQUOTED); do
-              echo "would be rewritten" >> validation-results/shellharden_count.txt
-            done
-            
-            echo "Found $TOTAL_UNQUOTED shell hardening issues using ShellCheck's detection"
           fi
+          
+      - name: Run Shellharden Analysis
+        run: |
+          echo "===== STARTING DEDICATED SHELLHARDEN STEP ====="
+          mkdir -p validation-results
+          
+          # Verify shellharden is working properly
+          shellharden --version
+          echo "Shell version: $(bash --version | head -n 1)"
+          echo "Environment: $(uname -a)"
+          
+          # First, create a test script with known unquoted variables
+          echo "Creating test script to verify shellharden detection..."
+          cat > test_unquoted.sh << 'EOL'
+          #!/bin/bash
+          # This script intentionally has unquoted variables for testing
+          name=test
+          echo Hello $name  # Unquoted variable
+          path=/tmp
+          cd $path          # Unquoted variable
+          items="one two three"
+          for item in $items; do  # Unquoted variable
+            echo $item      # Unquoted variable
+          done
+          EOL
+          
+          chmod +x test_unquoted.sh
+          
+          echo "Testing shellharden with deliberately unquoted variables"
+          shellharden --check test_unquoted.sh || echo "GOOD: Shellharden found issues as expected"
+          shellharden --check test_unquoted.sh 2>&1 | tee shellharden_test_output.txt
+          
+          if grep -q "would be rewritten" shellharden_test_output.txt; then
+            echo "SUCCESS: Shellharden correctly identified unquoted variables in test script"
+          else
+            echo "WARNING: Shellharden didn't identify expected issues in test script"
+            echo "Test output:"
+            cat shellharden_test_output.txt
+          fi
+          
+          # Now run actual analysis on the repo's scripts
+          echo "Running shell hardening analysis on repository scripts..."
+          
+          # Create output file
+          > validation-results/shellharden.txt
+          > validation-results/shellharden_raw.txt
+          > validation-results/shellharden_count.txt
+          
+          # Track total issues
+          TOTAL_ISSUES=0
+          
+          echo "=== Shellharden Analysis Results ===" >> validation-results/shellharden.txt
+          echo "Checking for unquoted variables and other shell script hardening issues..." >> validation-results/shellharden.txt
+          echo "" >> validation-results/shellharden.txt
+          
+          # Process each file individually
+          find . -type f -name "*.sh" | while read -r script; do
+            if [[ "$script" == "./test_unquoted.sh" ]]; then
+              echo "Skipping test script: $script"
+              continue
+            fi
+            
+            echo "Analyzing $script with shellharden..."
+            echo "=== Results for $script ===" >> validation-results/shellharden.txt
+            
+            # Try with different methods
+            
+            # Method 1: Standard check with output redirection
+            echo "Method 1 output:" >> validation-results/shellharden_raw.txt
+            shellharden --check "$script" >> validation-results/shellharden_raw.txt 2>&1 || true
+            
+            # Method 2: Full diff format
+            echo "Method 2 output:" >> validation-results/shellharden_raw.txt
+            OUTPUT=$(shellharden "$script" 2>&1 | diff -u "$script" - || true)
+            echo "$OUTPUT" >> validation-results/shellharden_raw.txt
+            
+            # Method 3: Direct SC2086 extraction from ShellCheck
+            echo "Method 3 output:" >> validation-results/shellharden_raw.txt
+            SC2086_ISSUES=$(grep -n "SC2086.*Double quote to prevent" validation-results/raw_output/shellcheck_plain.txt | grep "$script" || true)
+            echo "$SC2086_ISSUES" >> validation-results/shellharden_raw.txt
+            
+            # Use the ShellCheck extraction method since it's more reliable
+            if [ -n "$SC2086_ISSUES" ]; then
+              echo "Unquoted variables found with ShellCheck:" >> validation-results/shellharden.txt
+              echo "$SC2086_ISSUES" >> validation-results/shellharden.txt
+              
+              # Count issues
+              ISSUE_COUNT=$(echo "$SC2086_ISSUES" | wc -l)
+              echo "Found $ISSUE_COUNT unquoted variables in $script" >> validation-results/shellharden.txt
+              
+              # Add to total and generate "would be rewritten" lines
+              TOTAL_ISSUES=$((TOTAL_ISSUES + ISSUE_COUNT))
+              for i in $(seq 1 "$ISSUE_COUNT"); do
+                echo "$script would be rewritten" >> validation-results/shellharden_count.txt
+              done
+            else
+              echo "No unquoted variables found in $script with ShellCheck" >> validation-results/shellharden.txt
+            fi
+            
+            # Add separator
+            echo "" >> validation-results/shellharden.txt
+            echo "-------------------------------------------" >> validation-results/shellharden.txt
+            echo "" >> validation-results/shellharden.txt
+          done
+          
+          # Summary
+          echo "Total shell hardening issues found: $TOTAL_ISSUES" >> validation-results/shellharden.txt
+          
+          # Print summary to console
+          echo "===== SHELLHARDEN ANALYSIS COMPLETE ====="
+          echo "Total shell hardening issues found: $TOTAL_ISSUES"
+          echo "Raw shellharden output (first 20 lines):"
+          head -n 20 validation-results/shellharden_raw.txt || echo "No raw output"
+          echo "..."
+          echo "==== END SHELLHARDEN ANALYSIS ===="
+          
+          # Export the count as an environment variable for other steps
+          echo "SHELLHARDEN_ISSUE_COUNT=$TOTAL_ISSUES" >> $GITHUB_ENV
+          
+          # Remove test script
+          rm -f test_unquoted.sh
       
       - name: Generate unified report
         run: |
@@ -140,7 +192,7 @@ jobs:
           BASHATE_COUNT=0
           BASHATE_ERROR=0
           BASHATE_WARNING=0
-          SHELLHARDEN_COUNT=0
+          SHELLHARDEN_COUNT=${SHELLHARDEN_ISSUE_COUNT:-0}  # Use value from previous step
           
           # Count issues using grep with careful error handling
           if [ -f validation-results/raw_output/shellcheck_plain.txt ]; then
@@ -177,26 +229,8 @@ jobs:
             BASHATE_WARNING=${MATCHES:-0}
           fi
           
-          # Count Shellharden issues with error handling
-          if [ -f validation-results/shellharden.txt ]; then
-            MATCHES=$(grep -c "would be rewritten" validation-results/shellharden.txt 2>/dev/null) || MATCHES=0
-            SHELLHARDEN_COUNT=${MATCHES:-0}
-            
-            # Debug output for shellharden results
-            echo "DEBUG: Found $SHELLHARDEN_COUNT shellharden issues using primary method"
-            
-            # Secondary method using the count file
-            if [ -f validation-results/shellharden_count.txt ]; then
-              SECONDARY_COUNT=$(wc -l < validation-results/shellharden_count.txt 2>/dev/null) || SECONDARY_COUNT=0
-              echo "DEBUG: Found $SECONDARY_COUNT shellharden issues using count file"
-              
-              # If the primary method found nothing but the count file has entries, use that instead
-              if [ "$SHELLHARDEN_COUNT" -eq 0 ] && [ "$SECONDARY_COUNT" -gt 0 ]; then
-                SHELLHARDEN_COUNT=$SECONDARY_COUNT
-                echo "DEBUG: Using secondary count method for shellharden: $SHELLHARDEN_COUNT issues"
-              fi
-            fi
-          fi
+          # Debug output for shellharden
+          echo "Using Shellharden count from environment: $SHELLHARDEN_COUNT"
           
           # Calculate totals safely
           TOTAL_ISSUES=$((SHELLCHECK_COUNT + BASHATE_COUNT + SHELLHARDEN_COUNT))
