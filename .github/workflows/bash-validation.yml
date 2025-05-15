@@ -18,8 +18,24 @@ jobs:
           # Create results directory
           mkdir -p validation-results
           
-          # Run ShellCheck with detailed JSON output
-          find . -type f -name "*.sh" -exec shellcheck -f json1 {} \; > validation-results/shellcheck.json 
+          # Run ShellCheck with detailed JSON output - format properly for jq
+          echo '{"comments":[' > validation-results/shellcheck.json
+          FIRST=true
+          for script in $(find . -type f -name "*.sh"); do
+            if [ "$FIRST" = true ]; then
+              FIRST=false
+            else
+              echo "," >> validation-results/shellcheck.json
+            fi
+            shellcheck -f json1 "$script" >> validation-results/shellcheck.json
+          done
+          echo ']}' >> validation-results/shellcheck.json
+          
+          # Verify JSON validity and provide fallback
+          if ! jq empty validation-results/shellcheck.json 2>/dev/null; then
+            echo "Warning: Generated JSON is not valid, creating empty structure"
+            echo '{"comments":[]}' > validation-results/shellcheck.json
+          fi
           
           # Run Bashate
           find . -type f -name "*.sh" -exec bashate {} \; > validation-results/bashate.txt 2>&1 || true
@@ -29,9 +45,23 @@ jobs:
       
       - name: Generate unified report
         run: |
+          # Debug info
+          echo "ShellCheck output stats:"
+          jq '.comments | length' validation-results/shellcheck.json || echo "Failed to parse ShellCheck output"
+          
           # Create report parser
           cat > parse-reports.sh << 'EOF'
           #!/bin/bash
+          
+          # Print debug info
+          echo "Debug: Starting report generation"
+          echo "Debug: ShellCheck JSON validity check:"
+          if jq empty validation-results/shellcheck.json 2>/dev/null; then
+            echo "Debug: ShellCheck JSON is valid"
+          else
+            echo "Debug: ShellCheck JSON is NOT valid, creating empty structure"
+            echo '{"comments":[]}' > validation-results/shellcheck.json
+          fi
           
           # Function to determine severity from ShellCheck code
           get_severity() {
@@ -87,73 +117,96 @@ jobs:
             <div id="issues">
           HTML
           
+          echo "Debug: HTML header created"
+          
           # Process ShellCheck results
           SHELLCHECK_COUNT=0
           SHELLCHECK_ERROR=0
           SHELLCHECK_WARNING=0
           SHELLCHECK_INFO=0
           
-          if [ -s validation-results/shellcheck.json ]; then
+          if [ -s validation-results/shellcheck.json ] && jq empty validation-results/shellcheck.json 2>/dev/null; then
+            echo "Debug: Processing ShellCheck results"
             # Count issues by severity
-            SHELLCHECK_ERROR=$(jq '.comments | map(select(.level == "error")) | length' validation-results/shellcheck.json)
-            SHELLCHECK_WARNING=$(jq '.comments | map(select(.level == "warning")) | length' validation-results/shellcheck.json)
-            SHELLCHECK_INFO=$(jq '.comments | map(select(.level == "info" or .level == "style")) | length' validation-results/shellcheck.json)
-            SHELLCHECK_COUNT=$(jq '.comments | length' validation-results/shellcheck.json)
+            SHELLCHECK_ERROR=$(jq '.comments | map(select(.level == "error")) | length' validation-results/shellcheck.json || echo 0)
+            SHELLCHECK_WARNING=$(jq '.comments | map(select(.level == "warning")) | length' validation-results/shellcheck.json || echo 0)
+            SHELLCHECK_INFO=$(jq '.comments | map(select(.level == "info" or .level == "style")) | length' validation-results/shellcheck.json || echo 0)
+            SHELLCHECK_COUNT=$(jq '.comments | length' validation-results/shellcheck.json || echo 0)
             
-            # Group by file
-            jq -r '.comments | group_by(.file) | .[]' validation-results/shellcheck.json > file-groups.json 
+            echo "Debug: ShellCheck counts - Error: $SHELLCHECK_ERROR, Warning: $SHELLCHECK_WARNING, Info: $SHELLCHECK_INFO"
             
-            while IFS= read -r file_group; do
-              if [ -n "$file_group" ]; then
-                # Get file name
-                FILE=$(echo "$file_group" | jq -r '.[0].file')
-                
-                # Create file section
-                echo "<div class='file-section'>" >> validation-report.html
-                echo "<h2>$FILE</h2>" >> validation-report.html
-                
-                # Group by severity
-                echo "$file_group" | jq -s 'group_by(.level) | .[]' > severity-groups.json
-                
-                while IFS= read -r severity_group; do
-                  if [ -n "$severity_group" ]; then
-                    # Get severity
-                    SEVERITY=$(echo "$severity_group" | jq -r '.[0].level')
-                    
-                    # Add severity section
-                    echo "<h3 class='$SEVERITY'>${SEVERITY^} issues</h3>" >> validation-report.html
-                    
-                    # Add each issue
-                    echo "$severity_group" | jq -c '.[]' | while IFS= read -r issue; do
-                      LINE=$(echo "$issue" | jq -r '.line')
-                      COL=$(echo "$issue" | jq -r '.column')
-                      MSG=$(echo "$issue" | jq -r '.message')
-                      CODE=$(echo "$issue" | jq -r '.code')
-                      
-                      # Create unique ID for collapsible section
-                      ISSUE_ID="issue-$(echo "$FILE-$LINE-$COL-$CODE" | md5sum | cut -d' ' -f1)"
-                      
-                      echo "<div class='issue $SEVERITY'>" >> validation-report.html
-                      echo "<div class='issue-location'>Line $LINE, Column $COL: $MSG</div>" >> validation-report.html
-                      echo "<div>Code: SC$CODE</div>" >> validation-report.html
-                      
-                      # Add fix suggestion if available
-                      HAS_FIX=$(echo "$issue" | jq 'has("fix")')
-                      if [ "$HAS_FIX" = "true" ]; then
-                        echo "<div class='collapsible' onclick='toggleContent(\"$ISSUE_ID\")'>View suggested fix</div>" >> validation-report.html
-                        echo "<div id='$ISSUE_ID' class='content fix-suggestion'>" >> validation-report.html
-                        echo "<code>$(echo "$issue" | jq -r '.fix // "No fix available"')</code>" >> validation-report.html
-                        echo "</div>" >> validation-report.html
-                      fi 
-                      
-                      echo "</div>" >> validation-report.html
-                    done
-                  fi
-                done < severity-groups.json
-                
-                echo "</div>" >> validation-report.html
+            # Check if we have comments to process
+            if [ "$SHELLCHECK_COUNT" -gt 0 ]; then
+              # Group by file
+              echo "Debug: Grouping ShellCheck issues by file"
+              jq -r '.comments | group_by(.file) | .[]' validation-results/shellcheck.json > file-groups.json 
+              
+              # Debug file groups
+              echo "Debug: File groups content check:"
+              if [ -s file-groups.json ]; then
+                echo "Debug: file-groups.json is not empty"
+              else
+                echo "Debug: file-groups.json is empty"
               fi
-            done < file-groups.json
+              
+              while IFS= read -r file_group; do
+                if [ -n "$file_group" ]; then
+                  # Get file name
+                  FILE=$(echo "$file_group" | jq -r '.[0].file')
+                  echo "Debug: Processing file $FILE"
+                  
+                  # Create file section
+                  echo "<div class='file-section'>" >> validation-report.html
+                  echo "<h2>$FILE</h2>" >> validation-report.html
+                  
+                  # Group by severity
+                  echo "$file_group" | jq -s 'group_by(.level) | .[]' > severity-groups.json
+                  
+                  while IFS= read -r severity_group; do
+                    if [ -n "$severity_group" ]; then
+                      # Get severity
+                      SEVERITY=$(echo "$severity_group" | jq -r '.[0].level')
+                      echo "Debug: Processing severity $SEVERITY"
+                      
+                      # Add severity section
+                      echo "<h3 class='$SEVERITY'>${SEVERITY^} issues</h3>" >> validation-report.html
+                      
+                      # Add each issue
+                      echo "$severity_group" | jq -c '.[]' | while IFS= read -r issue; do
+                        LINE=$(echo "$issue" | jq -r '.line')
+                        COL=$(echo "$issue" | jq -r '.column')
+                        MSG=$(echo "$issue" | jq -r '.message')
+                        CODE=$(echo "$issue" | jq -r '.code')
+                        
+                        # Create unique ID for collapsible section
+                        ISSUE_ID="issue-$(echo "$FILE-$LINE-$COL-$CODE" | md5sum | cut -d' ' -f1)"
+                        
+                        echo "<div class='issue $SEVERITY'>" >> validation-report.html
+                        echo "<div class='issue-location'>Line $LINE, Column $COL: $MSG</div>" >> validation-report.html
+                        echo "<div>Code: SC$CODE</div>" >> validation-report.html
+                        
+                        # Add fix suggestion if available
+                        HAS_FIX=$(echo "$issue" | jq 'has("fix")')
+                        if [ "$HAS_FIX" = "true" ]; then
+                          echo "<div class='collapsible' onclick='toggleContent(\"$ISSUE_ID\")'>View suggested fix</div>" >> validation-report.html
+                          echo "<div id='$ISSUE_ID' class='content fix-suggestion'>" >> validation-report.html
+                          echo "<code>$(echo "$issue" | jq -r '.fix // "No fix available"')</code>" >> validation-report.html
+                          echo "</div>" >> validation-report.html
+                        fi 
+                        
+                        echo "</div>" >> validation-report.html
+                      done
+                    fi
+                  done < severity-groups.json
+                  
+                  echo "</div>" >> validation-report.html
+                fi
+              done < file-groups.json
+            else
+              echo "Debug: No ShellCheck issues found"
+            fi
+          else
+            echo "Debug: ShellCheck output is empty or invalid"
           fi
           
           # Process Bashate results
@@ -161,6 +214,7 @@ jobs:
           BASHATE_ERROR=0
           BASHATE_WARNING=0
           
+          echo "Debug: Processing Bashate results"
           if [ -s validation-results/bashate.txt ]; then
             # Parse Bashate output
             declare -A FILE_ISSUES
@@ -172,6 +226,8 @@ jobs:
                 COL="${BASH_REMATCH[3]}"
                 CODE="${BASH_REMATCH[4]}"
                 MSG="${BASH_REMATCH[5]}"
+                
+                echo "Debug: Found Bashate issue in $FILE: $CODE"
                 
                 # Determine severity
                 if [[ "$CODE" =~ ^E ]]; then
@@ -194,18 +250,24 @@ jobs:
               fi
             done < validation-results/bashate.txt
             
+            echo "Debug: Bashate counts - Error: $BASHATE_ERROR, Warning: $BASHATE_WARNING"
+            
             # Add Bashate results to report
             for FILE in "${!FILE_ISSUES[@]}"; do
+              echo "Debug: Adding Bashate results for $FILE"
               echo "<div class='file-section'>" >> validation-report.html
               echo "<h2>$FILE (Bashate)</h2>" >> validation-report.html
               echo "${FILE_ISSUES[$FILE]}" >> validation-report.html
               echo "</div>" >> validation-report.html
             done
+          else
+            echo "Debug: Bashate output is empty"
           fi
           
           # Process Shellharden results
           SHELLHARDEN_COUNT=0
           
+          echo "Debug: Processing Shellharden results"
           if [ -s validation-results/shellharden.txt ]; then
             # Parse Shellharden output
             declare -A SHELLHARDEN_FILES
@@ -215,6 +277,7 @@ jobs:
               if [[ $line =~ .*would\ be\ rewritten ]]; then
                 # Extract the file path using sed instead of regex capture
                 FILE=$(echo "$line" | sed -E 's/ would be rewritten.*//')
+                echo "Debug: Found Shellharden issue in $FILE"
                 
                 if [ -z "${SHELLHARDEN_FILES[$FILE]}" ]; then
                   SHELLHARDEN_FILES[$FILE]=1
@@ -226,8 +289,11 @@ jobs:
               fi
             done < validation-results/shellharden.txt
             
+            echo "Debug: Shellharden count: $SHELLHARDEN_COUNT"
+            
             # Add Shellharden results to report
             for FILE in "${!SHELLHARDEN_FILES[@]}"; do
+              echo "Debug: Adding Shellharden results for $FILE"
               echo "<div class='file-section'>" >> validation-report.html
               echo "<h2>$FILE (Shellharden)</h2>" >> validation-report.html
               echo "<div class='issue warning'>" >> validation-report.html
@@ -236,6 +302,8 @@ jobs:
               echo "</div>" >> validation-report.html
               echo "</div>" >> validation-report.html
             done
+          else
+            echo "Debug: Shellharden output is empty"
           fi
           
           # Add stats to summary
@@ -243,6 +311,8 @@ jobs:
           TOTAL_ERRORS=$((SHELLCHECK_ERROR + BASHATE_ERROR))
           TOTAL_WARNINGS=$((SHELLCHECK_WARNING + BASHATE_WARNING + SHELLHARDEN_COUNT))
           TOTAL_INFO=$((SHELLCHECK_INFO))
+          
+          echo "Debug: Total counts - Issues: $TOTAL_ISSUES, Errors: $TOTAL_ERRORS, Warnings: $TOTAL_WARNINGS, Info: $TOTAL_INFO"
           
           # Insert stats into the HTML
           STATS="<table>
@@ -259,12 +329,16 @@ jobs:
           # Insert stats into the HTML
           sed -i "s|<div id=\"stats\"></div>|<div id=\"stats\">$STATS</div>|" validation-report.html
           
+          echo "Debug: HTML report completed"
+          
           # Create a simple text report for console output
           echo "# Bash Script Validation Summary" > validation-report.txt
           echo "Total issues: $TOTAL_ISSUES ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)" >> validation-report.txt
           echo "- ShellCheck: $SHELLCHECK_COUNT ($SHELLCHECK_ERROR errors, $SHELLCHECK_WARNING warnings, $SHELLCHECK_INFO info)" >> validation-report.txt
           echo "- Bashate: $BASHATE_COUNT ($BASHATE_ERROR errors, $BASHATE_WARNING warnings)" >> validation-report.txt
           echo "- Shellharden: $SHELLHARDEN_COUNT quoting issues" >> validation-report.txt
+          
+          echo "Debug: Text report completed"
           
           # Create Markdown report for GitHub job summary
           echo "# Bash Script Validation Summary" > validation-report.md
@@ -288,7 +362,7 @@ jobs:
               
               # ShellCheck errors
               if [ $SHELLCHECK_ERROR -gt 0 ]; then
-                jq -r '.comments | map(select(.level == "error")) | sort_by(.file, .line) | .[0:5] | .[] | "- **\(.file)** Line \(.line): \(.message)"' validation-results/shellcheck.json >> validation-report.md
+                jq -r '.comments | map(select(.level == "error")) | sort_by(.file, .line) | .[0:5] | .[] | "- **\(.file)** Line \(.line): \(.message)"' validation-results/shellcheck.json >> validation-report.md || echo "- Error retrieving ShellCheck details" >> validation-report.md
               fi 
               
               # Bashate errors (simplified)
@@ -304,7 +378,7 @@ jobs:
               
               # ShellCheck warnings
               if [ $SHELLCHECK_WARNING -gt 0 ]; then
-                jq -r '.comments | map(select(.level == "warning")) | sort_by(.file, .line) | .[0:5] | .[] | "- **\(.file)** Line \(.line): \(.message)"' validation-results/shellcheck.json >> validation-report.md
+                jq -r '.comments | map(select(.level == "warning")) | sort_by(.file, .line) | .[0:5] | .[] | "- **\(.file)** Line \(.line): \(.message)"' validation-results/shellcheck.json >> validation-report.md || echo "- Error retrieving ShellCheck details" >> validation-report.md
               fi 
               
               # Bashate warnings
@@ -318,6 +392,8 @@ jobs:
               fi
             fi
           fi
+          
+          echo "Debug: Markdown report completed"
           EOF
           
           chmod +x parse-reports.sh
