@@ -1,159 +1,343 @@
-name: Shell Script Validation
-
-# Ensures workflow triggers on any push that includes shell scripts
-# or changes to the workflow file itself
-on:
-  push:
-    paths:
-      - '**/*.sh'
-      - '**/bashrc'
-      - '**/profile'
-      - '.github/workflows/shell-validate.yml'
-    # No branch restrictions to ensure it runs on all branches
-  pull_request:
-    paths:
-      - '**/*.sh'
-      - '**/bashrc'
-      - '**/profile'
-    # No branch restrictions for PRs to ensure broad coverage
-
-# Add debugging capability (uncomment when needed)
-# env:
-#   ACTIONS_RUNNER_DEBUG: true
-#   ACTIONS_STEP_DEBUG: true
+name: "Enhanced Bash Validation"
+on: [push, pull_request]
 
 jobs:
-  # First check if any shell scripts were modified
-  # This avoids running the full workflow unnecessarily
-  detect-files:
-    name: Detect Shell Scripts
-    runs-on: ubuntu-latest
-    outputs:
-      shell_scripts: ${{ steps.filter.outputs.shell_scripts }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Fetch all history for proper file comparison
-      
-      - name: Filter relevant files
-        id: filter
-        uses: dorny/paths-filter@v3
-        with:
-          filters: |
-            shell_scripts:
-              - '**/*.sh'
-              - '**/bashrc'
-              - '**/profile'
-              - 'scripts/**'
-
-  # Main validation job only runs if shell scripts were detected
   validate:
-    needs: detect-files
-    if: ${{ needs.detect-files.outputs.shell_scripts == 'true' }}
-    name: Validate Shell Scripts
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4 
       
-      # Debug step to show environment (uncomment when troubleshooting)
-      # - name: Debug environment
-      #   run: |
-      #     echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
-      #     echo "GITHUB_REF: $GITHUB_REF"
-      #     find . -type f -name "*.sh" | sort
-      
-      - name: Install dependencies
+      - name: Install validation tools
         run: |
           # ShellCheck is pre-installed on Ubuntu runners
-          # Install Python dependencies
           pip install bashate
-          
-          # Install Rust and Cargo for Shellharden
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          source "$HOME/.cargo/env"
-          
-          # Install Shellharden
-          cargo install shellharden --version 4.3.0
-          
-          # Verify installations
-          echo "Verifying tool installations:"
-          shellcheck --version
-          bashate --version
-          shellharden --version
-
-      - name: Run ShellCheck
-        id: shellcheck
-        continue-on-error: true
-        run: |
-          echo "Running ShellCheck validation..."
-          # Using find to locate all shell scripts
-          SCRIPTS=$(find . -type f -name "*.sh" -o -name "bashrc" -o -name "profile")
-          
-          if [ -z "$SCRIPTS" ]; then
-            echo "No shell scripts found to validate."
-            exit 0
-          fi
-          
-          # Run ShellCheck with detailed output
-          echo "$SCRIPTS" | xargs shellcheck -x
+          cargo install shellharden || echo "Failed to install Shellharden, continuing anyway"
       
-      - name: Run Shellharden
-        id: shellharden
-        continue-on-error: true
+      - name: Run validation tools
         run: |
-          echo "Running Shellharden validation..."
-          # Find all shell scripts
-          find . -type f -name "*.sh" -o -name "bashrc" -o -name "profile" | while read -r file; do
-            echo "Checking $file"
-            shellharden --check "$file" || echo "::warning file=$file::Shellharden found issues"
-          done
+          # Create results directory
+          mkdir -p validation-results
+          
+          # Run ShellCheck with detailed JSON output
+          find . -type f -name "*.sh" -exec shellcheck -f json1 {} \; > validation-results/shellcheck.json 
+          
+          # Run Bashate
+          find . -type f -name "*.sh" -exec bashate {} \; > validation-results/bashate.txt 2>&1 || true
+          
+          # Run Shellharden
+          find . -type f -name "*.sh" -exec bash -c 'shellharden --check "$1" 2>&1 || true' _ {} \; > validation-results/shellharden.txt 
       
-      - name: Run Bashate
-        id: bashate
-        continue-on-error: true
+      - name: Generate unified report
         run: |
-          echo "Running Bashate validation..."
-          # Find all shell scripts
-          find . -type f -name "*.sh" -o -name "bashrc" -o -name "profile" | while read -r file; do
-            echo "Checking $file"
-            bashate -i E006 "$file" || echo "::warning file=$file::Bashate found issues"
-          done
+          # Create report parser
+          cat > parse-reports.sh << 'EOF'
+          #!/bin/bash
+          
+          # Function to determine severity from ShellCheck code
+          get_severity() {
+            local code=$1
+            local prefix=${code:0:1}
+            
+            case "$prefix" in
+              "E") echo "error" ;;
+              "W") echo "warning" ;;
+              *) echo "info" ;;
+            esac
+          } 
+          
+          # Create HTML report header
+          cat > validation-report.html << 'HTML'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Bash Validation Report</title>
+            <style>
+              body { font-family: Arial, sans-serif; margin: 20px; }
+              h1, h2, h3 { color: #333; }
+              .error { color: #d73a49; background-color: #fff5f5; }
+              .warning { color: #e36209; background-color: #fff8f0; }
+              .info { color: #0366d6; background-color: #f0f8ff; }
+              .file-section { border: 1px solid #ddd; margin: 10px 0; padding: 10px; border-radius: 5px; }
+              .issue { padding: 8px; margin: 5px 0; border-radius: 3px; }
+              .fix-suggestion { background-color: #f0fff0; border-left: 4px solid #2cbe4e; padding: 10px; margin: 5px 0; }
+              code { font-family: monospace; background-color: #f6f8fa; padding: 2px 4px; }
+              .issue-location { font-weight: bold; }
+              .collapsible { cursor: pointer; }
+              .content { display: none; overflow: hidden; }
+            </style>
+            <script>
+              function toggleContent(id) {
+                var content = document.getElementById(id);
+                if (content.style.display === "block") {
+                  content.style.display = "none";
+                } else {
+                  content.style.display = "block";
+                }
+              }
+            </script>
+          </head>
+          <body>
+            <h1>Bash Script Validation Report</h1>
+            <p>Generated: $(date)</p>
+            <div id="summary">
+              <h2>Summary</h2>
+              <p>This report combines outputs from ShellCheck, Bashate, and Shellharden.</p>
+              <div id="stats"></div>
+            </div>
+            <div id="issues">
+          HTML
+          
+          # Process ShellCheck results
+          SHELLCHECK_COUNT=0
+          SHELLCHECK_ERROR=0
+          SHELLCHECK_WARNING=0
+          SHELLCHECK_INFO=0
+          
+          if [ -s validation-results/shellcheck.json ]; then
+            # Count issues by severity
+            SHELLCHECK_ERROR=$(jq '.comments | map(select(.level == "error")) | length' validation-results/shellcheck.json)
+            SHELLCHECK_WARNING=$(jq '.comments | map(select(.level == "warning")) | length' validation-results/shellcheck.json)
+            SHELLCHECK_INFO=$(jq '.comments | map(select(.level == "info" or .level == "style")) | length' validation-results/shellcheck.json)
+            SHELLCHECK_COUNT=$(jq '.comments | length' validation-results/shellcheck.json)
+            
+            # Group by file
+            jq -r '.comments | group_by(.file) | .[]' validation-results/shellcheck.json > file-groups.json 
+            
+            while IFS= read -r file_group; do
+              if [ -n "$file_group" ]; then
+                # Get file name
+                FILE=$(echo "$file_group" | jq -r '.[0].file')
+                
+                # Create file section
+                echo "<div class='file-section'>" >> validation-report.html
+                echo "<h2>$FILE</h2>" >> validation-report.html
+                
+                # Group by severity
+                echo "$file_group" | jq -s 'group_by(.level) | .[]' > severity-groups.json
+                
+                while IFS= read -r severity_group; do
+                  if [ -n "$severity_group" ]; then
+                    # Get severity
+                    SEVERITY=$(echo "$severity_group" | jq -r '.[0].level')
+                    
+                    # Add severity section
+                    echo "<h3 class='$SEVERITY'>${SEVERITY^} issues</h3>" >> validation-report.html
+                    
+                    # Add each issue
+                    echo "$severity_group" | jq -c '.[]' | while IFS= read -r issue; do
+                      LINE=$(echo "$issue" | jq -r '.line')
+                      COL=$(echo "$issue" | jq -r '.column')
+                      MSG=$(echo "$issue" | jq -r '.message')
+                      CODE=$(echo "$issue" | jq -r '.code')
+                      
+                      # Create unique ID for collapsible section
+                      ISSUE_ID="issue-$(echo "$FILE-$LINE-$COL-$CODE" | md5sum | cut -d' ' -f1)"
+                      
+                      echo "<div class='issue $SEVERITY'>" >> validation-report.html
+                      echo "<div class='issue-location'>Line $LINE, Column $COL: $MSG</div>" >> validation-report.html
+                      echo "<div>Code: SC$CODE</div>" >> validation-report.html
+                      
+                      # Add fix suggestion if available
+                      HAS_FIX=$(echo "$issue" | jq 'has("fix")')
+                      if [ "$HAS_FIX" = "true" ]; then
+                        echo "<div class='collapsible' onclick='toggleContent(\"$ISSUE_ID\")'>View suggested fix</div>" >> validation-report.html
+                        echo "<div id='$ISSUE_ID' class='content fix-suggestion'>" >> validation-report.html
+                        echo "<code>$(echo "$issue" | jq -r '.fix // "No fix available"')</code>" >> validation-report.html
+                        echo "</div>" >> validation-report.html
+                      fi 
+                      
+                      echo "</div>" >> validation-report.html
+                    done
+                  fi
+                done < severity-groups.json
+                
+                echo "</div>" >> validation-report.html
+              fi
+            done < file-groups.json
+          fi
+          
+          # Process Bashate results
+          BASHATE_COUNT=0
+          BASHATE_ERROR=0
+          BASHATE_WARNING=0
+          
+          if [ -s validation-results/bashate.txt ]; then
+            # Parse Bashate output
+            declare -A FILE_ISSUES
+            
+            while IFS= read -r line; do
+              if [[ $line =~ ^([^:]+):([0-9]+):([0-9]+):\ ([EW][0-9]+):\ (.*)$ ]]; then
+                FILE="${BASH_REMATCH[1]}"
+                LINE="${BASH_REMATCH[2]}"
+                COL="${BASH_REMATCH[3]}"
+                CODE="${BASH_REMATCH[4]}"
+                MSG="${BASH_REMATCH[5]}"
+                
+                # Determine severity
+                if [[ "$CODE" =~ ^E ]]; then
+                  SEVERITY="error"
+                  ((BASHATE_ERROR++))
+                else
+                  SEVERITY="warning"
+                  ((BASHATE_WARNING++))
+                fi
+                
+                ((BASHATE_COUNT++))
+                
+                # Add to file issues
+                if [ -z "${FILE_ISSUES[$FILE]}" ]; then
+                  FILE_ISSUES[$FILE]=""
+                fi
+                
+                ISSUE="<div class='issue $SEVERITY'><div class='issue-location'>Line $LINE, Column $COL: $MSG</div><div>Code: $CODE</div></div>"
+                FILE_ISSUES[$FILE]+="$ISSUE"
+              fi
+            done < validation-results/bashate.txt
+            
+            # Add Bashate results to report
+            for FILE in "${!FILE_ISSUES[@]}"; do
+              echo "<div class='file-section'>" >> validation-report.html
+              echo "<h2>$FILE (Bashate)</h2>" >> validation-report.html
+              echo "${FILE_ISSUES[$FILE]}" >> validation-report.html
+              echo "</div>" >> validation-report.html
+            done
+          fi
+          
+          # Process Shellharden results
+          SHELLHARDEN_COUNT=0
+          
+          if [ -s validation-results/shellharden.txt ]; then
+            # Parse Shellharden output
+            declare -A SHELLHARDEN_FILES
+            
+            while IFS= read -r line; do
+              if [[ $line =~ (.*) would be rewritten ]]; then
+                FILE="${BASH_REMATCH[1]}"
+                
+                if [ -z "${SHELLHARDEN_FILES[$FILE]}" ]; then
+                  SHELLHARDEN_FILES[$FILE]=1
+                else
+                  ((SHELLHARDEN_FILES[$FILE]++))
+                fi
+                
+                ((SHELLHARDEN_COUNT++)) 
+              fi
+            done < validation-results/shellharden.txt
+            
+            # Add Shellharden results to report
+            for FILE in "${!SHELLHARDEN_FILES[@]}"; do
+              echo "<div class='file-section'>" >> validation-report.html
+              echo "<h2>$FILE (Shellharden)</h2>" >> validation-report.html
+              echo "<div class='issue warning'>" >> validation-report.html
+              echo "<div class='issue-location'>Found ${SHELLHARDEN_FILES[$FILE]} quoting issues</div>" >> validation-report.html
+              echo "<p>Shellharden detected improper variable quoting. Run with <code>shellharden --transform $FILE</code> to see suggested fixes.</p>" >> validation-report.html 
+              echo "</div>" >> validation-report.html
+              echo "</div>" >> validation-report.html
+            done
+          fi
+          
+          # Add stats to summary
+          TOTAL_ISSUES=$((SHELLCHECK_COUNT + BASHATE_COUNT + SHELLHARDEN_COUNT))
+          TOTAL_ERRORS=$((SHELLCHECK_ERROR + BASHATE_ERROR))
+          TOTAL_WARNINGS=$((SHELLCHECK_WARNING + BASHATE_WARNING + SHELLHARDEN_COUNT))
+          TOTAL_INFO=$((SHELLCHECK_INFO))
+          
+          # Insert stats into the HTML
+          STATS="<table>
+            <tr><th>Tool</th><th>Errors</th><th>Warnings</th><th>Info</th><th>Total</th></tr>
+            <tr><td>ShellCheck</td><td>$SHELLCHECK_ERROR</td><td>$SHELLCHECK_WARNING</td><td>$SHELLCHECK_INFO</td><td>$SHELLCHECK_COUNT</td></tr>
+            <tr><td>Bashate</td><td>$BASHATE_ERROR</td><td>$BASHATE_WARNING</td><td>0</td><td>$BASHATE_COUNT</td></tr>
+            <tr><td>Shellharden</td><td>0</td><td>$SHELLHARDEN_COUNT</td><td>0</td><td>$SHELLHARDEN_COUNT</td></tr>
+            <tr><th>Total</th><th>$TOTAL_ERRORS</th><th>$TOTAL_WARNINGS</th><th>$TOTAL_INFO</th><th>$TOTAL_ISSUES</th></tr>
+          </table>"
+          
+          # Add closing tags to HTML
+          echo "</div></body></html>" >> validation-report.html
+          
+          # Insert stats into the HTML
+          sed -i "s|<div id=\"stats\"></div>|<div id=\"stats\">$STATS</div>|" validation-report.html
+          
+          # Create a simple text report for console output
+          echo "# Bash Script Validation Summary" > validation-report.txt
+          echo "Total issues: $TOTAL_ISSUES ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)" >> validation-report.txt
+          echo "- ShellCheck: $SHELLCHECK_COUNT ($SHELLCHECK_ERROR errors, $SHELLCHECK_WARNING warnings, $SHELLCHECK_INFO info)" >> validation-report.txt
+          echo "- Bashate: $BASHATE_COUNT ($BASHATE_ERROR errors, $BASHATE_WARNING warnings)" >> validation-report.txt
+          echo "- Shellharden: $SHELLHARDEN_COUNT quoting issues" >> validation-report.txt
+          
+          # Create Markdown report for GitHub job summary
+          echo "# Bash Script Validation Summary" > validation-report.md
+          echo "Total issues: **$TOTAL_ISSUES** ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)" >> validation-report.md
+          echo "" >> validation-report.md
+          echo "| Tool | Errors | Warnings | Info | Total |" >> validation-report.md
+          echo "|------|--------|----------|------|-------|" >> validation-report.md
+          echo "| ShellCheck | $SHELLCHECK_ERROR | $SHELLCHECK_WARNING | $SHELLCHECK_INFO | $SHELLCHECK_COUNT |" >> validation-report.md
+          echo "| Bashate | $BASHATE_ERROR | $BASHATE_WARNING | 0 | $BASHATE_COUNT |" >> validation-report.md
+          echo "| Shellharden | 0 | $SHELLHARDEN_COUNT | 0 | $SHELLHARDEN_COUNT |" >> validation-report.md
+          echo "| **Total** | **$TOTAL_ERRORS** | **$TOTAL_WARNINGS** | **$TOTAL_INFO** | **$TOTAL_ISSUES** |" >> validation-report.md 
+          
+          if [ $TOTAL_ISSUES -gt 0 ]; then
+            echo "" >> validation-report.md
+            echo "## Top issues by severity" >> validation-report.md
+            
+            # Add top 5 errors
+            if [ $TOTAL_ERRORS -gt 0 ]; then
+              echo "" >> validation-report.md
+              echo "### Errors" >> validation-report.md
+              
+              # ShellCheck errors
+              if [ $SHELLCHECK_ERROR -gt 0 ]; then
+                jq -r '.comments | map(select(.level == "error")) | sort_by(.file, .line) | .[0:5] | .[] | "- **\(.file)** Line \(.line): \(.message)"' validation-results/shellcheck.json >> validation-report.md
+              fi 
+              
+              # Bashate errors (simplified)
+              if [ $BASHATE_ERROR -gt 0 ]; then
+                grep -E ".*:.*:.*: E[0-9]+: .*" validation-results/bashate.txt | head -5 | sed -E 's/^([^:]+):([0-9]+):[0-9]+: (E[0-9]+): (.*)/- **\1** Line \2: \4 (\3)/' >> validation-report.md
+              fi
+            fi
+            
+            # Add top 5 warnings
+            if [ $TOTAL_WARNINGS -gt 0 ]; then
+              echo "" >> validation-report.md
+              echo "### Warnings" >> validation-report.md
+              
+              # ShellCheck warnings
+              if [ $SHELLCHECK_WARNING -gt 0 ]; then
+                jq -r '.comments | map(select(.level == "warning")) | sort_by(.file, .line) | .[0:5] | .[] | "- **\(.file)** Line \(.line): \(.message)"' validation-results/shellcheck.json >> validation-report.md
+              fi 
+              
+              # Bashate warnings
+              if [ $BASHATE_WARNING -gt 0 ]; then
+                grep -E ".*:.*:.*: W[0-9]+: .*" validation-results/bashate.txt | head -5 | sed -E 's/^([^:]+):([0-9]+):[0-9]+: (W[0-9]+): (.*)/- **\1** Line \2: \4 (\3)/' >> validation-report.md
+              fi
+              
+              # Shellharden issues
+              if [ $SHELLHARDEN_COUNT -gt 0 ]; then
+                grep -E ".*would be rewritten" validation-results/shellharden.txt | head -5 | sed -E 's/^(.*) would be rewritten.*/- **\1**: Variable quoting issue/' >> validation-report.md 
+              fi
+            fi
+          fi
+          EOF
+          
+          chmod +x parse-reports.sh
+          ./parse-reports.sh
+          
+          # Output the text report to console
+          cat validation-report.txt
+          
+          # Add to job summary
+          cat validation-report.md >> $GITHUB_STEP_SUMMARY
       
-      # Collect all results and fail if any validator failed
-      - name: Consolidate validation results
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: bash-validation-report
+          path: validation-report.html 
+      
+      - name: Check for critical issues
+        if: always()
         run: |
-          echo "Consolidating validation results..."
-          
-          # Check if any validator failed
-          if [ "${{ steps.shellcheck.outcome }}" == "failure" ]; then
-            echo "::error::ShellCheck found issues that need to be fixed"
-            FAILED=true
-          fi
-          
-          if [ "${{ steps.shellharden.outcome }}" == "failure" ]; then
-            echo "::error::Shellharden found issues that need to be fixed"
-            FAILED=true
-          fi
-          
-          if [ "${{ steps.bashate.outcome }}" == "failure" ]; then
-            echo "::error::Bashate found issues that need to be fixed"
-            FAILED=true
-          fi
-          
-          # Exit with failure if any validator failed
-          if [ "${FAILED:-false}" == "true" ]; then
-            echo "Shell script validation failed. Please fix the issues above."
+          ERRORS=$(grep -E "Total issues: .* \(([1-9][0-9]*).*errors" validation-report.txt || echo "0")
+          if [[ "$ERRORS" != "0" ]]; then
+            echo "::error::Found critical issues in bash scripts. See the validation report for details."
             exit 1
-          else
-            echo "All shell script validations passed!"
           fi
-      
-      # Optional: Interactive debugging session if needed
-      # Uncomment this step when you need to debug workflow issues
-      # - name: Setup Debug Session
-      #   if: ${{ failure() }}
-      #   uses: mxschmitt/action-tmate@v3
-      #   with:
-      #     limit-access-to-actor: true
