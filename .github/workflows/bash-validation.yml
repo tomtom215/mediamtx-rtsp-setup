@@ -28,38 +28,21 @@ jobs:
             touch validation-results/bashate.txt
             touch validation-results/shellharden.txt
           else
-            # Run ShellCheck individually for each file to handle potential errors
+            # Run ShellCheck and store raw output (no complex JSON processing)
+            echo "Running ShellCheck analysis..."
+            
+            # Create separate files for direct raw output
+            mkdir -p validation-results/raw_output
+            
+            # Get a basic list of files with issues for the report
+            find . -type f -name "*.sh" -exec shellcheck {} \; > validation-results/raw_output/shellcheck_plain.txt 2>&1 || true
+            
+            # Get JSON output for parsing attempts (but don't rely on it)
+            find . -type f -name "*.sh" -exec shellcheck -f json {} \; > validation-results/raw_output/shellcheck_json.txt 2>&1 || true
+            
+            # Create a simple JSON structure that won't fail parsing
             echo '{"comments":[]}' > validation-results/shellcheck.json
-            
-            # Create temporary directory for individual results
-            mkdir -p temp_shellcheck
-            
-            for script in $(find . -type f -name "*.sh"); do
-              echo "Running ShellCheck on $script"
-              # Run ShellCheck and capture exit code
-              if shellcheck -f json "$script" > "temp_shellcheck/$(basename "$script").json" 2>/dev/null; then
-                echo "ShellCheck completed successfully for $script"
-              else
-                echo "ShellCheck had warnings/errors for $script (normal behavior)"
-              fi
-            done
-            
-            # Combine results properly using jq if there are any results
-            RESULT_COUNT=$(find temp_shellcheck -type f -name "*.json" | wc -l)
-            if [ "$RESULT_COUNT" -gt 0 ]; then
-              echo "Combining $RESULT_COUNT ShellCheck results"
-              # Use jq to combine the results safely
-              jq -s '[.[] | .[] | {file: .file, line: .line, column: .column, level: .level, code: .code, message: .message, fix: .fix?}]' temp_shellcheck/*.json > temp_combined.json
-              # Create final well-formed JSON
-              jq '{"comments": .}' temp_combined.json > validation-results/shellcheck.json || echo '{"comments":[]}' > validation-results/shellcheck.json
-            fi
-            
-            # Verify the JSON is valid
-            if ! jq empty validation-results/shellcheck.json 2>/dev/null; then
-              echo "Warning: Generated ShellCheck JSON is not valid, creating empty structure"
-              echo '{"comments":[]}' > validation-results/shellcheck.json
-            fi
-            
+                      
             # Run Bashate with error handling
             echo "Running Bashate on shell scripts"
             find . -type f -name "*.sh" -exec bash -c 'bashate "$1" 2>&1 || true' _ {} \; > validation-results/bashate.txt
@@ -71,14 +54,35 @@ jobs:
       
       - name: Generate unified report
         run: |
-          # Create simple report parser script
-          cat > parse-reports.sh << 'EOF'
-          #!/bin/bash
+          # Count issues using grep instead of JSON parsing
+          SHELLCHECK_COUNT=$(grep -c "In .* line " validation-results/raw_output/shellcheck_plain.txt 2>/dev/null || echo 0)
+          SHELLCHECK_ERROR=$(grep -c "SC[0-9]\+: error:" validation-results/raw_output/shellcheck_plain.txt 2>/dev/null || echo 0)
+          SHELLCHECK_WARNING=$(grep -c "SC[0-9]\+: warning:" validation-results/raw_output/shellcheck_plain.txt 2>/dev/null || echo 0)
+          SHELLCHECK_INFO=$(grep -c "SC[0-9]\+: note:" validation-results/raw_output/shellcheck_plain.txt 2>/dev/null || echo 0)
+          SHELLCHECK_INFO=$((SHELLCHECK_INFO + SHELLCHECK_COUNT - SHELLCHECK_ERROR - SHELLCHECK_WARNING))
           
-          echo "Starting validation report generation..."
+          # Count Bashate issues
+          BASHATE_COUNT=$(grep -c -E "^[^:]+:[0-9]+:[0-9]+: [EW][0-9]+" validation-results/bashate.txt 2>/dev/null || echo 0)
+          BASHATE_ERROR=$(grep -c -E "^[^:]+:[0-9]+:[0-9]+: E[0-9]+" validation-results/bashate.txt 2>/dev/null || echo 0)
+          BASHATE_WARNING=$(grep -c -E "^[^:]+:[0-9]+:[0-9]+: W[0-9]+" validation-results/bashate.txt 2>/dev/null || echo 0)
           
-          # Create HTML report header
-          cat > validation-report.html << 'HTML'
+          # Count Shellharden issues
+          SHELLHARDEN_COUNT=$(grep -c "would be rewritten" validation-results/shellharden.txt 2>/dev/null || echo 0)
+          
+          # Calculate totals
+          TOTAL_ISSUES=$((SHELLCHECK_COUNT + BASHATE_COUNT + SHELLHARDEN_COUNT))
+          TOTAL_ERRORS=$((SHELLCHECK_ERROR + BASHATE_ERROR))
+          TOTAL_WARNINGS=$((SHELLCHECK_WARNING + BASHATE_WARNING + SHELLHARDEN_COUNT))
+          TOTAL_INFO=$((SHELLCHECK_INFO))
+          
+          echo "Issue counts:"
+          echo "- ShellCheck: $SHELLCHECK_COUNT ($SHELLCHECK_ERROR errors, $SHELLCHECK_WARNING warnings, $SHELLCHECK_INFO info)"
+          echo "- Bashate: $BASHATE_COUNT ($BASHATE_ERROR errors, $BASHATE_WARNING warnings)"
+          echo "- Shellharden: $SHELLHARDEN_COUNT issues"
+          echo "- Total: $TOTAL_ISSUES ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)"
+          
+          # Create an HTML report without complex processing
+          cat > validation-report.html << EOL
           <!DOCTYPE html>
           <html>
           <head>
@@ -91,320 +95,172 @@ jobs:
               .info { color: #0366d6; background-color: #f0f8ff; }
               .file-section { border: 1px solid #ddd; margin: 10px 0; padding: 10px; border-radius: 5px; }
               .issue { padding: 8px; margin: 5px 0; border-radius: 3px; }
-              .fix-suggestion { background-color: #f0fff0; border-left: 4px solid #2cbe4e; padding: 10px; margin: 5px 0; }
-              code { font-family: monospace; background-color: #f6f8fa; padding: 2px 4px; }
-              .issue-location { font-weight: bold; }
-              .collapsible { cursor: pointer; }
-              .content { display: none; overflow: hidden; }
+              pre { background-color: #f6f8fa; padding: 16px; overflow: auto; }
             </style>
-            <script>
-              function toggleContent(id) {
-                var content = document.getElementById(id);
-                if (content.style.display === "block") {
-                  content.style.display = "none";
-                } else {
-                  content.style.display = "block";
-                }
-              }
-            </script>
           </head>
           <body>
             <h1>Bash Script Validation Report</h1>
             <p>Generated: $(date)</p>
-            <div id="summary">
-              <h2>Summary</h2>
-              <p>This report combines outputs from ShellCheck, Bashate, and Shellharden.</p>
-              <div id="stats"></div>
-            </div>
-            <div id="issues">
-          HTML
+            
+            <h2>Summary</h2>
+            <table border="1" cellpadding="5" cellspacing="0">
+              <tr>
+                <th>Tool</th>
+                <th>Errors</th>
+                <th>Warnings</th>
+                <th>Info</th>
+                <th>Total</th>
+              </tr>
+              <tr>
+                <td>ShellCheck</td>
+                <td>${SHELLCHECK_ERROR}</td>
+                <td>${SHELLCHECK_WARNING}</td>
+                <td>${SHELLCHECK_INFO}</td>
+                <td>${SHELLCHECK_COUNT}</td>
+              </tr>
+              <tr>
+                <td>Bashate</td>
+                <td>${BASHATE_ERROR}</td>
+                <td>${BASHATE_WARNING}</td>
+                <td>0</td>
+                <td>${BASHATE_COUNT}</td>
+              </tr>
+              <tr>
+                <td>Shellharden</td>
+                <td>0</td>
+                <td>${SHELLHARDEN_COUNT}</td>
+                <td>0</td>
+                <td>${SHELLHARDEN_COUNT}</td>
+              </tr>
+              <tr>
+                <th>Total</th>
+                <th>${TOTAL_ERRORS}</th>
+                <th>${TOTAL_WARNINGS}</th>
+                <th>${TOTAL_INFO}</th>
+                <th>${TOTAL_ISSUES}</th>
+              </tr>
+            </table>
+            
+            <h2>Raw ShellCheck Output</h2>
+            <pre>
+EOL
           
-          # Initialize counters
-          SHELLCHECK_COUNT=0
-          SHELLCHECK_ERROR=0
-          SHELLCHECK_WARNING=0
-          SHELLCHECK_INFO=0
-          BASHATE_COUNT=0
-          BASHATE_ERROR=0
-          BASHATE_WARNING=0
-          SHELLHARDEN_COUNT=0
+          # Add the raw ShellCheck output to the HTML
+          cat validation-results/raw_output/shellcheck_plain.txt >> validation-report.html 2>/dev/null || echo "No ShellCheck output available" >> validation-report.html
           
-          # Process ShellCheck results if file exists and is valid JSON
-          if [ -s validation-results/shellcheck.json ] && jq empty validation-results/shellcheck.json 2>/dev/null; then
-            echo "Processing ShellCheck results..."
+          # Continue HTML report
+          cat >> validation-report.html << EOL
+            </pre>
             
-            # Count issues by severity
-            SHELLCHECK_ERROR=$(jq '.comments | map(select(.level == "error")) | length' validation-results/shellcheck.json 2>/dev/null || echo 0)
-            SHELLCHECK_WARNING=$(jq '.comments | map(select(.level == "warning")) | length' validation-results/shellcheck.json 2>/dev/null || echo 0)
-            SHELLCHECK_INFO=$(jq '.comments | map(select(.level == "info" or .level == "style")) | length' validation-results/shellcheck.json 2>/dev/null || echo 0)
-            SHELLCHECK_COUNT=$(jq '.comments | length' validation-results/shellcheck.json 2>/dev/null || echo 0)
-            
-            echo "Found $SHELLCHECK_COUNT ShellCheck issues ($SHELLCHECK_ERROR errors, $SHELLCHECK_WARNING warnings, $SHELLCHECK_INFO info)"
-            
-            # Process issues if we have any
-            if [ "$SHELLCHECK_COUNT" -gt 0 ]; then
-              # Create a temporary file for each file+severity combination
-              ISSUES_BY_FILE=$(jq -r '.comments | group_by(.file) | map({filename: .[0].file, issues: .}) | .[]' validation-results/shellcheck.json 2>/dev/null)
-              
-              if [ -n "$ISSUES_BY_FILE" ]; then
-                echo "$ISSUES_BY_FILE" | while read -r file_block; do
-                  FILENAME=$(echo "$file_block" | jq -r '.filename')
-                  ISSUES=$(echo "$file_block" | jq -r '.issues')
-                  
-                  echo "Processing $FILENAME with $(echo "$ISSUES" | jq 'length') issues"
-                  
-                  # Create file section in HTML
-                  echo "<div class='file-section'>" >> validation-report.html
-                  echo "<h2>$FILENAME</h2>" >> validation-report.html
-                  
-                  # Group by severity
-                  LEVELS=$(echo "$ISSUES" | jq -r 'group_by(.level) | map({level: .[0].level, issues: .}) | .[]')
-                  
-                  echo "$LEVELS" | while read -r level_block; do
-                    LEVEL=$(echo "$level_block" | jq -r '.level')
-                    LEVEL_ISSUES=$(echo "$level_block" | jq -r '.issues')
-                    
-                    echo "<h3 class='$LEVEL'>${LEVEL^} issues</h3>" >> validation-report.html
-                    
-                    echo "$LEVEL_ISSUES" | jq -c '.[]' | while read -r issue; do
-                      LINE=$(echo "$issue" | jq -r '.line')
-                      COL=$(echo "$issue" | jq -r '.column')
-                      MSG=$(echo "$issue" | jq -r '.message')
-                      CODE=$(echo "$issue" | jq -r '.code')
-                      
-                      # Create unique ID for collapsible section
-                      ISSUE_ID="issue-$(echo "$FILENAME-$LINE-$COL-$CODE" | md5sum | cut -d' ' -f1)"
-                      
-                      echo "<div class='issue $LEVEL'>" >> validation-report.html
-                      echo "<div class='issue-location'>Line $LINE, Column $COL: $MSG</div>" >> validation-report.html
-                      echo "<div>Code: SC$CODE</div>" >> validation-report.html
-                      
-                      # Add fix suggestion if available
-                      HAS_FIX=$(echo "$issue" | jq 'has("fix")')
-                      if [ "$HAS_FIX" = "true" ]; then
-                        echo "<div class='collapsible' onclick='toggleContent(\"$ISSUE_ID\")'>View suggested fix</div>" >> validation-report.html
-                        echo "<div id='$ISSUE_ID' class='content fix-suggestion'>" >> validation-report.html
-                        echo "<code>$(echo "$issue" | jq -r '.fix // "No fix available"')</code>" >> validation-report.html
-                        echo "</div>" >> validation-report.html
-                      fi
-                      
-                      echo "</div>" >> validation-report.html
-                    done
-                  done
-                  
-                  echo "</div>" >> validation-report.html
-                done
-              else
-                echo "No file-grouped issues found in ShellCheck results"
-              fi
-            else
-              echo "No ShellCheck issues found"
-            fi
-          else
-            echo "ShellCheck results file is empty or invalid"
-          fi
+            <h2>Raw Bashate Output</h2>
+            <pre>
+EOL
           
-          # Process Bashate results
-          if [ -s validation-results/bashate.txt ]; then
-            echo "Processing Bashate results..."
-            
-            # Parse Bashate output
-            declare -A FILE_ISSUES
-            
-            while IFS= read -r line; do
-              if [[ $line =~ ^([^:]+):([0-9]+):([0-9]+):\ ([EW][0-9]+):\ (.*)$ ]]; then
-                FILE="${BASH_REMATCH[1]}"
-                LINE="${BASH_REMATCH[2]}"
-                COL="${BASH_REMATCH[3]}"
-                CODE="${BASH_REMATCH[4]}"
-                MSG="${BASH_REMATCH[5]}"
-                
-                # Determine severity
-                if [[ "$CODE" =~ ^E ]]; then
-                  SEVERITY="error"
-                  ((BASHATE_ERROR++))
-                else
-                  SEVERITY="warning"
-                  ((BASHATE_WARNING++))
-                fi
-                
-                ((BASHATE_COUNT++))
-                
-                # Add to file issues
-                if [ -z "${FILE_ISSUES[$FILE]}" ]; then
-                  FILE_ISSUES[$FILE]=""
-                fi
-                
-                ISSUE="<div class='issue $SEVERITY'><div class='issue-location'>Line $LINE, Column $COL: $MSG</div><div>Code: $CODE</div></div>"
-                FILE_ISSUES[$FILE]+="$ISSUE"
-              fi
-            done < validation-results/bashate.txt
-            
-            echo "Found $BASHATE_COUNT Bashate issues ($BASHATE_ERROR errors, $BASHATE_WARNING warnings)"
-            
-            # Add Bashate results to report
-            for FILE in "${!FILE_ISSUES[@]}"; do
-              echo "<div class='file-section'>" >> validation-report.html
-              echo "<h2>$FILE (Bashate)</h2>" >> validation-report.html
-              echo "${FILE_ISSUES[$FILE]}" >> validation-report.html
-              echo "</div>" >> validation-report.html
-            done
-          else
-            echo "Bashate results file is empty"
-          fi
+          # Add Bashate output to the HTML
+          cat validation-results/bashate.txt >> validation-report.html 2>/dev/null || echo "No Bashate output available" >> validation-report.html
           
-          # Process Shellharden results
-          if [ -s validation-results/shellharden.txt ]; then
-            echo "Processing Shellharden results..."
+          # Continue HTML report
+          cat >> validation-report.html << EOL
+            </pre>
             
-            # Parse Shellharden output
-            declare -A SHELLHARDEN_FILES
+            <h2>Raw Shellharden Output</h2>
+            <pre>
+EOL
+          
+          # Add Shellharden output to the HTML
+          cat validation-results/shellharden.txt >> validation-report.html 2>/dev/null || echo "No Shellharden output available" >> validation-report.html
+          
+          # Finish HTML report
+          cat >> validation-report.html << EOL
+            </pre>
             
-            while IFS= read -r line; do
-              # Simple string check for Shellharden issues
-              if [[ $line == *"would be rewritten"* ]]; then
-                # Extract the file path using sed
-                FILE=$(echo "$line" | sed -E 's/ would be rewritten.*//')
-                
-                if [ -z "${SHELLHARDEN_FILES[$FILE]}" ]; then
-                  SHELLHARDEN_FILES[$FILE]=1
-                else
-                  ((SHELLHARDEN_FILES[$FILE]++))
-                fi
-                
-                ((SHELLHARDEN_COUNT++))
-              fi
-            done < validation-results/shellharden.txt
+            <h2>Guidance for Common Issues</h2>
             
-            echo "Found $SHELLHARDEN_COUNT Shellharden issues"
+            <h3>ShellCheck</h3>
+            <ul>
+              <li>Visit <a href="https://www.shellcheck.net/">shellcheck.net</a> to learn more about specific error codes</li>
+              <li>Common issues include quoting variables, command substitution, and conditional syntax</li>
+            </ul>
             
-            # Add Shellharden results to report
-            for FILE in "${!SHELLHARDEN_FILES[@]}"; do
-              echo "<div class='file-section'>" >> validation-report.html
-              echo "<h2>$FILE (Shellharden)</h2>" >> validation-report.html
-              echo "<div class='issue warning'>" >> validation-report.html
-              echo "<div class='issue-location'>Found ${SHELLHARDEN_FILES[$FILE]} quoting issues</div>" >> validation-report.html
-              echo "<p>Shellharden detected improper variable quoting. Run with <code>shellharden --transform \"$FILE\"</code> to see suggested fixes.</p>" >> validation-report.html
-              echo "</div>" >> validation-report.html
-              echo "</div>" >> validation-report.html
-            done
-          else
-            echo "Shellharden results file is empty"
-          fi
-          
-          # Add stats to summary
-          TOTAL_ISSUES=$((SHELLCHECK_COUNT + BASHATE_COUNT + SHELLHARDEN_COUNT))
-          TOTAL_ERRORS=$((SHELLCHECK_ERROR + BASHATE_ERROR))
-          TOTAL_WARNINGS=$((SHELLCHECK_WARNING + BASHATE_WARNING + SHELLHARDEN_COUNT))
-          TOTAL_INFO=$((SHELLCHECK_INFO))
-          
-          echo "Total: $TOTAL_ISSUES issues ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)"
-          
-          # Insert stats into the HTML
-          STATS="<table>
-            <tr><th>Tool</th><th>Errors</th><th>Warnings</th><th>Info</th><th>Total</th></tr>
-            <tr><td>ShellCheck</td><td>$SHELLCHECK_ERROR</td><td>$SHELLCHECK_WARNING</td><td>$SHELLCHECK_INFO</td><td>$SHELLCHECK_COUNT</td></tr>
-            <tr><td>Bashate</td><td>$BASHATE_ERROR</td><td>$BASHATE_WARNING</td><td>0</td><td>$BASHATE_COUNT</td></tr>
-            <tr><td>Shellharden</td><td>0</td><td>$SHELLHARDEN_COUNT</td><td>0</td><td>$SHELLHARDEN_COUNT</td></tr>
-            <tr><th>Total</th><th>$TOTAL_ERRORS</th><th>$TOTAL_WARNINGS</th><th>$TOTAL_INFO</th><th>$TOTAL_ISSUES</th></tr>
-          </table>"
-          
-          # Add closing tags to HTML
-          echo "</div></body></html>" >> validation-report.html
-          
-          # Insert stats into the HTML
-          sed -i "s|<div id=\"stats\"></div>|<div id=\"stats\">$STATS</div>|" validation-report.html
+            <h3>Bashate</h3>
+            <ul>
+              <li>E001: Indentation not a multiple of 4</li>
+              <li>E002: Tab indentation</li>
+              <li>E003: Indent not increasing by 4</li>
+              <li>E004: Incorrect continuation line indentation</li>
+              <li>E005: Function declaration not in format 'function name {}'</li>
+              <li>E006: Line too long (>79 chars)</li>
+            </ul>
+            
+            <h3>Shellharden</h3>
+            <ul>
+              <li>Always quote your variables: use \"\$var\" instead of \$var</li>
+              <li>Run shellharden with --transform to automatically fix issues</li>
+            </ul>
+          </body>
+          </html>
+EOL
           
           # Create a simple text report for console output
-          echo "# Bash Script Validation Summary" > validation-report.txt
-          echo "Total issues: $TOTAL_ISSUES ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)" >> validation-report.txt
-          echo "- ShellCheck: $SHELLCHECK_COUNT ($SHELLCHECK_ERROR errors, $SHELLCHECK_WARNING warnings, $SHELLCHECK_INFO info)" >> validation-report.txt
-          echo "- Bashate: $BASHATE_COUNT ($BASHATE_ERROR errors, $BASHATE_WARNING warnings)" >> validation-report.txt
-          echo "- Shellharden: $SHELLHARDEN_COUNT quoting issues" >> validation-report.txt
+          cat > validation-report.txt << EOL
+# Bash Script Validation Summary
+Total issues: $TOTAL_ISSUES ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)
+- ShellCheck: $SHELLCHECK_COUNT ($SHELLCHECK_ERROR errors, $SHELLCHECK_WARNING warnings, $SHELLCHECK_INFO info)
+- Bashate: $BASHATE_COUNT ($BASHATE_ERROR errors, $BASHATE_WARNING warnings)
+- Shellharden: $SHELLHARDEN_COUNT quoting issues
+EOL
           
           # Create Markdown report for GitHub job summary
-          echo "# Bash Script Validation Summary" > validation-report.md
-          echo "Total issues: **$TOTAL_ISSUES** ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)" >> validation-report.md
-          echo "" >> validation-report.md
-          echo "| Tool | Errors | Warnings | Info | Total |" >> validation-report.md
-          echo "|------|--------|----------|------|-------|" >> validation-report.md
-          echo "| ShellCheck | $SHELLCHECK_ERROR | $SHELLCHECK_WARNING | $SHELLCHECK_INFO | $SHELLCHECK_COUNT |" >> validation-report.md
-          echo "| Bashate | $BASHATE_ERROR | $BASHATE_WARNING | 0 | $BASHATE_COUNT |" >> validation-report.md
-          echo "| Shellharden | 0 | $SHELLHARDEN_COUNT | 0 | $SHELLHARDEN_COUNT |" >> validation-report.md
-          echo "| **Total** | **$TOTAL_ERRORS** | **$TOTAL_WARNINGS** | **$TOTAL_INFO** | **$TOTAL_ISSUES** |" >> validation-report.md
-          
-          if [ $TOTAL_ISSUES -gt 0 ]; then
-            echo "" >> validation-report.md
-            echo "## Issues by File" >> validation-report.md
-            
-            # Add issues by file for better backlog creation
-            if [ $SHELLCHECK_COUNT -gt 0 ]; then
-              echo "" >> validation-report.md
-              echo "### ShellCheck Issues" >> validation-report.md
-              
-              jq -r '.comments | group_by(.file) | .[] | "#### " + .[0].file + "\n\n" + 
-                 (. | sort_by(.level == "error" | not, .level == "warning" | not, .line) | 
-                 map("- **" + .level + "** (Line " + (.line|tostring) + ", Col " + (.column|tostring) + 
-                 "): " + .message + " (SC" + (.code|tostring) + ")") | join("\n"))' \
-                 validation-results/shellcheck.json >> validation-report.md || 
-                 echo "Error generating ShellCheck report details" >> validation-report.md
-            fi
-            
-            if [ $BASHATE_COUNT -gt 0 ]; then
-              echo "" >> validation-report.md
-              echo "### Bashate Issues" >> validation-report.md
-              
-              # Group Bashate issues by file
-              for FILE in "${!FILE_ISSUES[@]}"; do
-                echo "#### $FILE" >> validation-report.md
-                echo "" >> validation-report.md
-                grep -E "^$FILE:[0-9]+:[0-9]+: [EW][0-9]+: " validation-results/bashate.txt | 
-                  sort | 
-                  sed -E 's/^[^:]+:([0-9]+):([0-9]+): (E[0-9]+): (.*)/- **error** (Line \1, Col \2): \4 (\3)/' | 
-                  sed -E 's/^[^:]+:([0-9]+):([0-9]+): (W[0-9]+): (.*)/- **warning** (Line \1, Col \2): \4 (\3)/' >> validation-report.md
-                echo "" >> validation-report.md
-              done
-            fi
-            
-            if [ $SHELLHARDEN_COUNT -gt 0 ]; then
-              echo "" >> validation-report.md
-              echo "### Shellharden Issues" >> validation-report.md
-              
-              # Group Shellharden issues by file
-              for FILE in "${!SHELLHARDEN_FILES[@]}"; do
-                echo "#### $FILE" >> validation-report.md
-                echo "" >> validation-report.md
-                echo "- **warning**: ${SHELLHARDEN_FILES[$FILE]} variable quoting issues detected. Run \`shellharden --transform \"$FILE\"\` to see suggested fixes." >> validation-report.md
-                echo "" >> validation-report.md
-              done
-            fi
-            
-            echo "" >> validation-report.md
-            echo "## How to Fix Common Issues" >> validation-report.md
-            echo "" >> validation-report.md
-            echo "### ShellCheck" >> validation-report.md
-            echo "- Visit [shellcheck.net](https://www.shellcheck.net/) to see explanations for each error code" >> validation-report.md
-            echo "- Or run \`shellcheck -f json <script> | jq '.comments[] | {code, message, fix}'\` locally to see fixes" >> validation-report.md
-            echo "" >> validation-report.md
-            echo "### Bashate" >> validation-report.md
-            echo "- E001: Indentation not a multiple of 4" >> validation-report.md
-            echo "- E002: Tab indentation" >> validation-report.md
-            echo "- E003: Indent not increasing by 4" >> validation-report.md
-            echo "- E004: Incorrect continuation line indentation" >> validation-report.md
-            echo "- E005: Function declaration not in format 'function name {'" >> validation-report.md
-            echo "- E006: Line too long (> 79 chars)" >> validation-report.md
-            echo "- E010: Do not on same line as [" >> validation-report.md
-            echo "" >> validation-report.md
-            echo "### Shellharden" >> validation-report.md
-            echo "- Properly quote your variables: use \`\"\$var\"\` instead of \`\$var\` to avoid word splitting" >> validation-report.md
-          fi
-          
-          echo "Report generation completed"
-          EOF
-          
-          # Make the script executable and run it
-          chmod +x parse-reports.sh
-          ./parse-reports.sh
+          cat > validation-report.md << EOL
+# Bash Script Validation Summary
+
+Total issues: **$TOTAL_ISSUES** ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)
+
+| Tool | Errors | Warnings | Info | Total |
+|------|--------|----------|------|-------|
+| ShellCheck | $SHELLCHECK_ERROR | $SHELLCHECK_WARNING | $SHELLCHECK_INFO | $SHELLCHECK_COUNT |
+| Bashate | $BASHATE_ERROR | $BASHATE_WARNING | 0 | $BASHATE_COUNT |
+| Shellharden | 0 | $SHELLHARDEN_COUNT | 0 | $SHELLHARDEN_COUNT |
+| **Total** | **$TOTAL_ERRORS** | **$TOTAL_WARNINGS** | **$TOTAL_INFO** | **$TOTAL_ISSUES** |
+
+## ShellCheck Issues
+
+<details>
+<summary>Click to expand raw ShellCheck output</summary>
+
+\`\`\`
+$(cat validation-results/raw_output/shellcheck_plain.txt 2>/dev/null || echo "No ShellCheck output available")
+\`\`\`
+</details>
+
+## Bashate Issues
+
+<details>
+<summary>Click to expand raw Bashate output</summary>
+
+\`\`\`
+$(cat validation-results/bashate.txt 2>/dev/null || echo "No Bashate output available")
+\`\`\`
+</details>
+
+## How to Fix Common Issues
+
+### ShellCheck
+- Visit [shellcheck.net](https://www.shellcheck.net/) to see explanations for each error code
+- Common issues include unquoted variables, command substitution issues, and conditionals
+
+### Bashate
+- E001: Indentation not a multiple of 4
+- E002: Tab indentation
+- E003: Indent not increasing by 4
+- E004: Incorrect continuation line indentation
+- E005: Function declaration not in format 'function name {}'
+- E006: Line too long (> 79 chars)
+
+### Shellharden
+- Always quote your variables: use \`"\$var"\` instead of \`\$var\`
+- Run shellharden with --transform to automatically fix issues
+EOL
           
           # Output the text report to console
           cat validation-report.txt
