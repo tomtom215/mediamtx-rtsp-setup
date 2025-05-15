@@ -27,6 +27,9 @@ jobs:
             echo '{"comments":[]}' > validation-results/shellcheck.json
             touch validation-results/bashate.txt
             touch validation-results/shellharden.txt
+            mkdir -p validation-results/raw_output
+            touch validation-results/raw_output/shellcheck_plain.txt
+            touch validation-results/raw_output/shellcheck_json.txt
           else
             # Run ShellCheck and store raw output (no complex JSON processing)
             echo "Running ShellCheck analysis..."
@@ -54,22 +57,58 @@ jobs:
       
       - name: Generate unified report
         run: |
-          # Count issues using grep instead of JSON parsing
-          SHELLCHECK_COUNT=$(grep -c "In .* line " validation-results/raw_output/shellcheck_plain.txt 2>/dev/null || echo 0)
-          SHELLCHECK_ERROR=$(grep -c "SC[0-9]\+: error:" validation-results/raw_output/shellcheck_plain.txt 2>/dev/null || echo 0)
-          SHELLCHECK_WARNING=$(grep -c "SC[0-9]\+: warning:" validation-results/raw_output/shellcheck_plain.txt 2>/dev/null || echo 0)
-          SHELLCHECK_INFO=$(grep -c "SC[0-9]\+: note:" validation-results/raw_output/shellcheck_plain.txt 2>/dev/null || echo 0)
-          SHELLCHECK_INFO=$((SHELLCHECK_INFO + SHELLCHECK_COUNT - SHELLCHECK_ERROR - SHELLCHECK_WARNING))
+          # Initialize counters properly with integers
+          SHELLCHECK_COUNT=0
+          SHELLCHECK_ERROR=0
+          SHELLCHECK_WARNING=0
+          SHELLCHECK_INFO=0
+          BASHATE_COUNT=0
+          BASHATE_ERROR=0
+          BASHATE_WARNING=0
+          SHELLHARDEN_COUNT=0
           
-          # Count Bashate issues
-          BASHATE_COUNT=$(grep -c -E "^[^:]+:[0-9]+:[0-9]+: [EW][0-9]+" validation-results/bashate.txt 2>/dev/null || echo 0)
-          BASHATE_ERROR=$(grep -c -E "^[^:]+:[0-9]+:[0-9]+: E[0-9]+" validation-results/bashate.txt 2>/dev/null || echo 0)
-          BASHATE_WARNING=$(grep -c -E "^[^:]+:[0-9]+:[0-9]+: W[0-9]+" validation-results/bashate.txt 2>/dev/null || echo 0)
+          # Count issues using grep with careful error handling
+          if [ -f validation-results/raw_output/shellcheck_plain.txt ]; then
+            # Get initial matches for "In .* line"
+            MATCHES=$(grep -c "In .* line " validation-results/raw_output/shellcheck_plain.txt 2>/dev/null) || MATCHES=0
+            SHELLCHECK_COUNT=${MATCHES:-0}
+            
+            # Count error, warning, and info separately
+            MATCHES=$(grep -c "SC[0-9]\+: error:" validation-results/raw_output/shellcheck_plain.txt 2>/dev/null) || MATCHES=0
+            SHELLCHECK_ERROR=${MATCHES:-0}
+            
+            MATCHES=$(grep -c "SC[0-9]\+: warning:" validation-results/raw_output/shellcheck_plain.txt 2>/dev/null) || MATCHES=0
+            SHELLCHECK_WARNING=${MATCHES:-0}
+            
+            MATCHES=$(grep -c "SC[0-9]\+: note:" validation-results/raw_output/shellcheck_plain.txt 2>/dev/null) || MATCHES=0
+            SHELLCHECK_INFO=${MATCHES:-0}
+            
+            # If the total is greater than the sum of categorized issues, add the difference to info
+            CATEGORIZED=$((SHELLCHECK_ERROR + SHELLCHECK_WARNING + SHELLCHECK_INFO))
+            if [ "$SHELLCHECK_COUNT" -gt "$CATEGORIZED" ]; then
+              SHELLCHECK_INFO=$((SHELLCHECK_INFO + SHELLCHECK_COUNT - CATEGORIZED))
+            fi
+          fi
           
-          # Count Shellharden issues
-          SHELLHARDEN_COUNT=$(grep -c "would be rewritten" validation-results/shellharden.txt 2>/dev/null || echo 0)
+          # Count Bashate issues with error handling
+          if [ -f validation-results/bashate.txt ]; then
+            MATCHES=$(grep -c -E "^[^:]+:[0-9]+:[0-9]+: [EW][0-9]+" validation-results/bashate.txt 2>/dev/null) || MATCHES=0
+            BASHATE_COUNT=${MATCHES:-0}
+            
+            MATCHES=$(grep -c -E "^[^:]+:[0-9]+:[0-9]+: E[0-9]+" validation-results/bashate.txt 2>/dev/null) || MATCHES=0
+            BASHATE_ERROR=${MATCHES:-0}
+            
+            MATCHES=$(grep -c -E "^[^:]+:[0-9]+:[0-9]+: W[0-9]+" validation-results/bashate.txt 2>/dev/null) || MATCHES=0
+            BASHATE_WARNING=${MATCHES:-0}
+          fi
           
-          # Calculate totals
+          # Count Shellharden issues with error handling
+          if [ -f validation-results/shellharden.txt ]; then
+            MATCHES=$(grep -c "would be rewritten" validation-results/shellharden.txt 2>/dev/null) || MATCHES=0
+            SHELLHARDEN_COUNT=${MATCHES:-0}
+          fi
+          
+          # Calculate totals safely
           TOTAL_ISSUES=$((SHELLCHECK_COUNT + BASHATE_COUNT + SHELLHARDEN_COUNT))
           TOTAL_ERRORS=$((SHELLCHECK_ERROR + BASHATE_ERROR))
           TOTAL_WARNINGS=$((SHELLCHECK_WARNING + BASHATE_WARNING + SHELLHARDEN_COUNT))
@@ -142,19 +181,31 @@ jobs:
           # ShellCheck output section
           echo '  <h2>Raw ShellCheck Output</h2>' >> validation-report.html
           echo '  <pre>' >> validation-report.html
-          cat validation-results/raw_output/shellcheck_plain.txt >> validation-report.html 2>/dev/null || echo "No ShellCheck output available" >> validation-report.html
+          if [ -f validation-results/raw_output/shellcheck_plain.txt ]; then
+            cat validation-results/raw_output/shellcheck_plain.txt >> validation-report.html 2>/dev/null || echo "No ShellCheck output available" >> validation-report.html
+          else
+            echo "No ShellCheck output available" >> validation-report.html
+          fi
           echo '  </pre>' >> validation-report.html
           
           # Bashate output section
           echo '  <h2>Raw Bashate Output</h2>' >> validation-report.html
           echo '  <pre>' >> validation-report.html
-          cat validation-results/bashate.txt >> validation-report.html 2>/dev/null || echo "No Bashate output available" >> validation-report.html
+          if [ -f validation-results/bashate.txt ]; then
+            cat validation-results/bashate.txt >> validation-report.html 2>/dev/null || echo "No Bashate output available" >> validation-report.html
+          else
+            echo "No Bashate output available" >> validation-report.html
+          fi
           echo '  </pre>' >> validation-report.html
           
           # Shellharden output section
           echo '  <h2>Raw Shellharden Output</h2>' >> validation-report.html
           echo '  <pre>' >> validation-report.html
-          cat validation-results/shellharden.txt >> validation-report.html 2>/dev/null || echo "No Shellharden output available" >> validation-report.html
+          if [ -f validation-results/shellharden.txt ]; then
+            cat validation-results/shellharden.txt >> validation-report.html 2>/dev/null || echo "No Shellharden output available" >> validation-report.html
+          else
+            echo "No Shellharden output available" >> validation-report.html
+          fi
           echo '  </pre>' >> validation-report.html
           
           # Guidance section
@@ -212,7 +263,11 @@ jobs:
           echo "<summary>Click to expand ShellCheck output</summary>" >> validation-report.md
           echo "" >> validation-report.md
           echo '```' >> validation-report.md
-          cat validation-results/raw_output/shellcheck_plain.txt >> validation-report.md 2>/dev/null || echo "No ShellCheck output available" >> validation-report.md
+          if [ -f validation-results/raw_output/shellcheck_plain.txt ]; then
+            cat validation-results/raw_output/shellcheck_plain.txt >> validation-report.md 2>/dev/null || echo "No ShellCheck output available" >> validation-report.md
+          else
+            echo "No ShellCheck output available" >> validation-report.md
+          fi
           echo '```' >> validation-report.md
           echo "</details>" >> validation-report.md
           echo "" >> validation-report.md
@@ -224,7 +279,27 @@ jobs:
           echo "<summary>Click to expand Bashate output</summary>" >> validation-report.md
           echo "" >> validation-report.md
           echo '```' >> validation-report.md
-          cat validation-results/bashate.txt >> validation-report.md 2>/dev/null || echo "No Bashate output available" >> validation-report.md
+          if [ -f validation-results/bashate.txt ]; then
+            cat validation-results/bashate.txt >> validation-report.md 2>/dev/null || echo "No Bashate output available" >> validation-report.md
+          else
+            echo "No Bashate output available" >> validation-report.md
+          fi
+          echo '```' >> validation-report.md
+          echo "</details>" >> validation-report.md
+          echo "" >> validation-report.md
+          
+          # Shellharden details
+          echo "## Shellharden Issues" >> validation-report.md
+          echo "" >> validation-report.md
+          echo "<details>" >> validation-report.md
+          echo "<summary>Click to expand Shellharden output</summary>" >> validation-report.md
+          echo "" >> validation-report.md
+          echo '```' >> validation-report.md
+          if [ -f validation-results/shellharden.txt ]; then
+            cat validation-results/shellharden.txt >> validation-report.md 2>/dev/null || echo "No Shellharden output available" >> validation-report.md
+          else
+            echo "No Shellharden output available" >> validation-report.md
+          fi
           echo '```' >> validation-report.md
           echo "</details>" >> validation-report.md
           echo "" >> validation-report.md
@@ -251,8 +326,10 @@ jobs:
           # Output the text report to console
           cat validation-report.txt
           
-          # Add to job summary
-          cat validation-report.md >> $GITHUB_STEP_SUMMARY
+          # Add to job summary if supported
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            cat validation-report.md >> $GITHUB_STEP_SUMMARY
+          fi
       
       - name: Upload HTML report
         uses: actions/upload-artifact@v4
@@ -264,10 +341,13 @@ jobs:
         if: always()
         run: |
           if [ -f validation-report.txt ]; then
-            ERRORS=$(grep -E "Total issues: .* \(([1-9][0-9]*).*errors" validation-report.txt || echo "0")
-            if [[ "$ERRORS" != "0" ]]; then
-              echo "::error::Found critical issues in bash scripts. See the validation report for details."
+            # Safely extract error count with proper error handling
+            ERRORS=$(grep -o -E "Total issues: [0-9]+ \([0-9]+" validation-report.txt | grep -o -E "\([0-9]+" | grep -o -E "[0-9]+") || echo "0"
+            if [ -n "$ERRORS" ] && [ "$ERRORS" -gt 0 ]; then
+              echo "::error::Found $ERRORS critical errors in bash scripts. See the validation report for details."
               exit 1
+            else
+              echo "No critical errors found in bash scripts."
             fi
           else
             echo "::warning::Validation report not generated. Check previous steps for errors."
