@@ -81,186 +81,172 @@ jobs:
           echo "- Shellharden: $SHELLHARDEN_COUNT issues"
           echo "- Total: $TOTAL_ISSUES ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)"
           
-          # Create an HTML report without complex processing
-          cat > validation-report.html << EOL
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <title>Bash Validation Report</title>
-            <style>
-              body { font-family: Arial, sans-serif; margin: 20px; }
-              h1, h2, h3 { color: #333; }
-              .error { color: #d73a49; background-color: #fff5f5; }
-              .warning { color: #e36209; background-color: #fff8f0; }
-              .info { color: #0366d6; background-color: #f0f8ff; }
-              .file-section { border: 1px solid #ddd; margin: 10px 0; padding: 10px; border-radius: 5px; }
-              .issue { padding: 8px; margin: 5px 0; border-radius: 3px; }
-              pre { background-color: #f6f8fa; padding: 16px; overflow: auto; }
-            </style>
-          </head>
-          <body>
-            <h1>Bash Script Validation Report</h1>
-            <p>Generated: $(date)</p>
-            
-            <h2>Summary</h2>
-            <table border="1" cellpadding="5" cellspacing="0">
-              <tr>
-                <th>Tool</th>
-                <th>Errors</th>
-                <th>Warnings</th>
-                <th>Info</th>
-                <th>Total</th>
-              </tr>
-              <tr>
-                <td>ShellCheck</td>
-                <td>${SHELLCHECK_ERROR}</td>
-                <td>${SHELLCHECK_WARNING}</td>
-                <td>${SHELLCHECK_INFO}</td>
-                <td>${SHELLCHECK_COUNT}</td>
-              </tr>
-              <tr>
-                <td>Bashate</td>
-                <td>${BASHATE_ERROR}</td>
-                <td>${BASHATE_WARNING}</td>
-                <td>0</td>
-                <td>${BASHATE_COUNT}</td>
-              </tr>
-              <tr>
-                <td>Shellharden</td>
-                <td>0</td>
-                <td>${SHELLHARDEN_COUNT}</td>
-                <td>0</td>
-                <td>${SHELLHARDEN_COUNT}</td>
-              </tr>
-              <tr>
-                <th>Total</th>
-                <th>${TOTAL_ERRORS}</th>
-                <th>${TOTAL_WARNINGS}</th>
-                <th>${TOTAL_INFO}</th>
-                <th>${TOTAL_ISSUES}</th>
-              </tr>
-            </table>
-            
-            <h2>Raw ShellCheck Output</h2>
-            <pre>
-EOL
+          # Create HTML report - write to file line by line to avoid YAML syntax issues
+          echo '<!DOCTYPE html>' > validation-report.html
+          echo '<html>' >> validation-report.html
+          echo '<head>' >> validation-report.html
+          echo '  <title>Bash Validation Report</title>' >> validation-report.html
+          echo '  <style>' >> validation-report.html
+          echo '    body { font-family: Arial, sans-serif; margin: 20px; }' >> validation-report.html
+          echo '    h1, h2, h3 { color: #333; }' >> validation-report.html
+          echo '    .error { color: #d73a49; background-color: #fff5f5; }' >> validation-report.html
+          echo '    .warning { color: #e36209; background-color: #fff8f0; }' >> validation-report.html
+          echo '    .info { color: #0366d6; background-color: #f0f8ff; }' >> validation-report.html
+          echo '    .file-section { border: 1px solid #ddd; margin: 10px 0; padding: 10px; border-radius: 5px; }' >> validation-report.html
+          echo '    .issue { padding: 8px; margin: 5px 0; border-radius: 3px; }' >> validation-report.html
+          echo '    pre { background-color: #f6f8fa; padding: 16px; overflow: auto; }' >> validation-report.html
+          echo '  </style>' >> validation-report.html
+          echo '</head>' >> validation-report.html
+          echo '<body>' >> validation-report.html
+          echo '  <h1>Bash Script Validation Report</h1>' >> validation-report.html
+          echo "  <p>Generated: $(date)</p>" >> validation-report.html
+          echo '  <h2>Summary</h2>' >> validation-report.html
+          echo '  <table border="1" cellpadding="5" cellspacing="0">' >> validation-report.html
+          echo '    <tr>' >> validation-report.html
+          echo '      <th>Tool</th>' >> validation-report.html
+          echo '      <th>Errors</th>' >> validation-report.html
+          echo '      <th>Warnings</th>' >> validation-report.html
+          echo '      <th>Info</th>' >> validation-report.html
+          echo '      <th>Total</th>' >> validation-report.html
+          echo '    </tr>' >> validation-report.html
+          echo "    <tr>" >> validation-report.html
+          echo "      <td>ShellCheck</td>" >> validation-report.html
+          echo "      <td>$SHELLCHECK_ERROR</td>" >> validation-report.html
+          echo "      <td>$SHELLCHECK_WARNING</td>" >> validation-report.html
+          echo "      <td>$SHELLCHECK_INFO</td>" >> validation-report.html
+          echo "      <td>$SHELLCHECK_COUNT</td>" >> validation-report.html
+          echo "    </tr>" >> validation-report.html
+          echo "    <tr>" >> validation-report.html
+          echo "      <td>Bashate</td>" >> validation-report.html
+          echo "      <td>$BASHATE_ERROR</td>" >> validation-report.html
+          echo "      <td>$BASHATE_WARNING</td>" >> validation-report.html
+          echo "      <td>0</td>" >> validation-report.html
+          echo "      <td>$BASHATE_COUNT</td>" >> validation-report.html
+          echo "    </tr>" >> validation-report.html
+          echo "    <tr>" >> validation-report.html
+          echo "      <td>Shellharden</td>" >> validation-report.html
+          echo "      <td>0</td>" >> validation-report.html
+          echo "      <td>$SHELLHARDEN_COUNT</td>" >> validation-report.html
+          echo "      <td>0</td>" >> validation-report.html
+          echo "      <td>$SHELLHARDEN_COUNT</td>" >> validation-report.html
+          echo "    </tr>" >> validation-report.html
+          echo "    <tr>" >> validation-report.html
+          echo "      <th>Total</th>" >> validation-report.html
+          echo "      <th>$TOTAL_ERRORS</th>" >> validation-report.html
+          echo "      <th>$TOTAL_WARNINGS</th>" >> validation-report.html
+          echo "      <th>$TOTAL_INFO</th>" >> validation-report.html
+          echo "      <th>$TOTAL_ISSUES</th>" >> validation-report.html
+          echo "    </tr>" >> validation-report.html
+          echo '  </table>' >> validation-report.html
           
-          # Add the raw ShellCheck output to the HTML
+          # ShellCheck output section
+          echo '  <h2>Raw ShellCheck Output</h2>' >> validation-report.html
+          echo '  <pre>' >> validation-report.html
           cat validation-results/raw_output/shellcheck_plain.txt >> validation-report.html 2>/dev/null || echo "No ShellCheck output available" >> validation-report.html
+          echo '  </pre>' >> validation-report.html
           
-          # Continue HTML report
-          cat >> validation-report.html << EOL
-            </pre>
-            
-            <h2>Raw Bashate Output</h2>
-            <pre>
-EOL
-          
-          # Add Bashate output to the HTML
+          # Bashate output section
+          echo '  <h2>Raw Bashate Output</h2>' >> validation-report.html
+          echo '  <pre>' >> validation-report.html
           cat validation-results/bashate.txt >> validation-report.html 2>/dev/null || echo "No Bashate output available" >> validation-report.html
+          echo '  </pre>' >> validation-report.html
           
-          # Continue HTML report
-          cat >> validation-report.html << EOL
-            </pre>
-            
-            <h2>Raw Shellharden Output</h2>
-            <pre>
-EOL
-          
-          # Add Shellharden output to the HTML
+          # Shellharden output section
+          echo '  <h2>Raw Shellharden Output</h2>' >> validation-report.html
+          echo '  <pre>' >> validation-report.html
           cat validation-results/shellharden.txt >> validation-report.html 2>/dev/null || echo "No Shellharden output available" >> validation-report.html
+          echo '  </pre>' >> validation-report.html
           
-          # Finish HTML report
-          cat >> validation-report.html << EOL
-            </pre>
-            
-            <h2>Guidance for Common Issues</h2>
-            
-            <h3>ShellCheck</h3>
-            <ul>
-              <li>Visit <a href="https://www.shellcheck.net/">shellcheck.net</a> to learn more about specific error codes</li>
-              <li>Common issues include quoting variables, command substitution, and conditional syntax</li>
-            </ul>
-            
-            <h3>Bashate</h3>
-            <ul>
-              <li>E001: Indentation not a multiple of 4</li>
-              <li>E002: Tab indentation</li>
-              <li>E003: Indent not increasing by 4</li>
-              <li>E004: Incorrect continuation line indentation</li>
-              <li>E005: Function declaration not in format 'function name {}'</li>
-              <li>E006: Line too long (>79 chars)</li>
-            </ul>
-            
-            <h3>Shellharden</h3>
-            <ul>
-              <li>Always quote your variables: use \"\$var\" instead of \$var</li>
-              <li>Run shellharden with --transform to automatically fix issues</li>
-            </ul>
-          </body>
-          </html>
-EOL
+          # Guidance section
+          echo '  <h2>Guidance for Common Issues</h2>' >> validation-report.html
+          
+          echo '  <h3>ShellCheck</h3>' >> validation-report.html
+          echo '  <ul>' >> validation-report.html
+          echo '    <li>Visit <a href="https://www.shellcheck.net/">shellcheck.net</a> to learn more about specific error codes</li>' >> validation-report.html
+          echo '    <li>Common issues include quoting variables, command substitution, and conditional syntax</li>' >> validation-report.html
+          echo '  </ul>' >> validation-report.html
+          
+          echo '  <h3>Bashate</h3>' >> validation-report.html
+          echo '  <ul>' >> validation-report.html
+          echo '    <li>E001: Indentation not a multiple of 4</li>' >> validation-report.html
+          echo '    <li>E002: Tab indentation</li>' >> validation-report.html
+          echo '    <li>E003: Indent not increasing by 4</li>' >> validation-report.html
+          echo '    <li>E004: Incorrect continuation line indentation</li>' >> validation-report.html
+          echo '    <li>E005: Function declaration not in format "function name {}"</li>' >> validation-report.html
+          echo '    <li>E006: Line too long (>79 chars)</li>' >> validation-report.html
+          echo '  </ul>' >> validation-report.html
+          
+          echo '  <h3>Shellharden</h3>' >> validation-report.html
+          echo '  <ul>' >> validation-report.html
+          echo '    <li>Always quote your variables: use "$var" instead of $var</li>' >> validation-report.html
+          echo '    <li>Run shellharden with --transform to automatically fix issues</li>' >> validation-report.html
+          echo '  </ul>' >> validation-report.html
+          
+          echo '</body>' >> validation-report.html
+          echo '</html>' >> validation-report.html
           
           # Create a simple text report for console output
-          cat > validation-report.txt << EOL
-# Bash Script Validation Summary
-Total issues: $TOTAL_ISSUES ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)
-- ShellCheck: $SHELLCHECK_COUNT ($SHELLCHECK_ERROR errors, $SHELLCHECK_WARNING warnings, $SHELLCHECK_INFO info)
-- Bashate: $BASHATE_COUNT ($BASHATE_ERROR errors, $BASHATE_WARNING warnings)
-- Shellharden: $SHELLHARDEN_COUNT quoting issues
-EOL
+          echo "# Bash Script Validation Summary" > validation-report.txt
+          echo "Total issues: $TOTAL_ISSUES ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)" >> validation-report.txt
+          echo "- ShellCheck: $SHELLCHECK_COUNT ($SHELLCHECK_ERROR errors, $SHELLCHECK_WARNING warnings, $SHELLCHECK_INFO info)" >> validation-report.txt
+          echo "- Bashate: $BASHATE_COUNT ($BASHATE_ERROR errors, $BASHATE_WARNING warnings)" >> validation-report.txt
+          echo "- Shellharden: $SHELLHARDEN_COUNT quoting issues" >> validation-report.txt
           
           # Create Markdown report for GitHub job summary
-          cat > validation-report.md << EOL
-# Bash Script Validation Summary
-
-Total issues: **$TOTAL_ISSUES** ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)
-
-| Tool | Errors | Warnings | Info | Total |
-|------|--------|----------|------|-------|
-| ShellCheck | $SHELLCHECK_ERROR | $SHELLCHECK_WARNING | $SHELLCHECK_INFO | $SHELLCHECK_COUNT |
-| Bashate | $BASHATE_ERROR | $BASHATE_WARNING | 0 | $BASHATE_COUNT |
-| Shellharden | 0 | $SHELLHARDEN_COUNT | 0 | $SHELLHARDEN_COUNT |
-| **Total** | **$TOTAL_ERRORS** | **$TOTAL_WARNINGS** | **$TOTAL_INFO** | **$TOTAL_ISSUES** |
-
-## ShellCheck Issues
-
-<details>
-<summary>Click to expand raw ShellCheck output</summary>
-
-\`\`\`
-$(cat validation-results/raw_output/shellcheck_plain.txt 2>/dev/null || echo "No ShellCheck output available")
-\`\`\`
-</details>
-
-## Bashate Issues
-
-<details>
-<summary>Click to expand raw Bashate output</summary>
-
-\`\`\`
-$(cat validation-results/bashate.txt 2>/dev/null || echo "No Bashate output available")
-\`\`\`
-</details>
-
-## How to Fix Common Issues
-
-### ShellCheck
-- Visit [shellcheck.net](https://www.shellcheck.net/) to see explanations for each error code
-- Common issues include unquoted variables, command substitution issues, and conditionals
-
-### Bashate
-- E001: Indentation not a multiple of 4
-- E002: Tab indentation
-- E003: Indent not increasing by 4
-- E004: Incorrect continuation line indentation
-- E005: Function declaration not in format 'function name {}'
-- E006: Line too long (> 79 chars)
-
-### Shellharden
-- Always quote your variables: use \`"\$var"\` instead of \`\$var\`
-- Run shellharden with --transform to automatically fix issues
-EOL
+          echo "# Bash Script Validation Summary" > validation-report.md
+          echo "" >> validation-report.md
+          echo "Total issues: **$TOTAL_ISSUES** ($TOTAL_ERRORS errors, $TOTAL_WARNINGS warnings, $TOTAL_INFO info)" >> validation-report.md
+          echo "" >> validation-report.md
+          echo "| Tool | Errors | Warnings | Info | Total |" >> validation-report.md
+          echo "|------|--------|----------|------|-------|" >> validation-report.md
+          echo "| ShellCheck | $SHELLCHECK_ERROR | $SHELLCHECK_WARNING | $SHELLCHECK_INFO | $SHELLCHECK_COUNT |" >> validation-report.md
+          echo "| Bashate | $BASHATE_ERROR | $BASHATE_WARNING | 0 | $BASHATE_COUNT |" >> validation-report.md
+          echo "| Shellharden | 0 | $SHELLHARDEN_COUNT | 0 | $SHELLHARDEN_COUNT |" >> validation-report.md
+          echo "| **Total** | **$TOTAL_ERRORS** | **$TOTAL_WARNINGS** | **$TOTAL_INFO** | **$TOTAL_ISSUES** |" >> validation-report.md
+          echo "" >> validation-report.md
+          
+          # ShellCheck details
+          echo "## ShellCheck Issues" >> validation-report.md
+          echo "" >> validation-report.md
+          echo "<details>" >> validation-report.md
+          echo "<summary>Click to expand ShellCheck output</summary>" >> validation-report.md
+          echo "" >> validation-report.md
+          echo '```' >> validation-report.md
+          cat validation-results/raw_output/shellcheck_plain.txt >> validation-report.md 2>/dev/null || echo "No ShellCheck output available" >> validation-report.md
+          echo '```' >> validation-report.md
+          echo "</details>" >> validation-report.md
+          echo "" >> validation-report.md
+          
+          # Bashate details
+          echo "## Bashate Issues" >> validation-report.md
+          echo "" >> validation-report.md
+          echo "<details>" >> validation-report.md
+          echo "<summary>Click to expand Bashate output</summary>" >> validation-report.md
+          echo "" >> validation-report.md
+          echo '```' >> validation-report.md
+          cat validation-results/bashate.txt >> validation-report.md 2>/dev/null || echo "No Bashate output available" >> validation-report.md
+          echo '```' >> validation-report.md
+          echo "</details>" >> validation-report.md
+          echo "" >> validation-report.md
+          
+          # Common issues section
+          echo "## How to Fix Common Issues" >> validation-report.md
+          echo "" >> validation-report.md
+          echo "### ShellCheck" >> validation-report.md
+          echo "- Visit [shellcheck.net](https://www.shellcheck.net/) to see explanations for each error code" >> validation-report.md
+          echo "- Common issues include unquoted variables, command substitution issues, and conditionals" >> validation-report.md
+          echo "" >> validation-report.md
+          echo "### Bashate" >> validation-report.md
+          echo "- E001: Indentation not a multiple of 4" >> validation-report.md
+          echo "- E002: Tab indentation" >> validation-report.md
+          echo "- E003: Indent not increasing by 4" >> validation-report.md
+          echo "- E004: Incorrect continuation line indentation" >> validation-report.md
+          echo "- E005: Function declaration not in format 'function name {}'" >> validation-report.md
+          echo "- E006: Line too long (> 79 chars)" >> validation-report.md
+          echo "" >> validation-report.md
+          echo "### Shellharden" >> validation-report.md
+          echo "- Always quote your variables: use \`\"\$var\"\` instead of \`\$var\`" >> validation-report.md
+          echo "- Run shellharden with --transform to automatically fix issues" >> validation-report.md
           
           # Output the text report to console
           cat validation-report.txt
