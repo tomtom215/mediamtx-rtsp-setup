@@ -1,0 +1,255 @@
+name: Bash Script Validation
+
+on:
+  push:
+    branches:
+      - '**'  # Run on all branches
+
+jobs:
+  validate-bash-scripts:
+    name: Validate Bash Scripts
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4 
+      
+      # Install necessary tools
+      - name: Set up tools
+        run: |
+          # ShellCheck is pre-installed on Ubuntu runners
+          shellcheck --version
+          
+          # Install Shellharden via cargo
+          sudo apt-get update
+          sudo apt-get install -y cargo
+          cargo install shellharden
+          shellharden --version
+          
+          # Install Bashate via pip
+          pip install bashate
+          bashate --version
+      
+      # ShellCheck validation
+      - name: Run ShellCheck
+        id: shellcheck
+        continue-on-error: true
+        run: |
+          mkdir -p reports/shellcheck
+          
+          # Check each script individually so all are validated
+          SCRIPTS=(*.sh)
+          for script in "${SCRIPTS[@]}"; do
+            echo "Checking $script with ShellCheck"
+            # Run check and save to reports
+            shellcheck -x --severity=warning -f tty "$script" > "reports/shellcheck/${script}.tty.txt" || true
+            shellcheck -x --severity=warning -f json "$script" > "reports/shellcheck/${script}.json" || true
+            shellcheck -x --severity=warning -f checkstyle "$script" > "reports/shellcheck/${script}.checkstyle.xml" || true 
+            
+            # Save exit code for summary
+            shellcheck -x --severity=warning "$script" || echo "$script" >> reports/shellcheck/failed_scripts.txt
+          done
+          
+          # Generate summary report
+          echo "# ShellCheck Validation Results" > reports/shellcheck/summary.md
+          echo "Generated: $(date)" >> reports/shellcheck/summary.md
+          echo "" >> reports/shellcheck/summary.md
+          
+          echo "## Scripts Analyzed" >> reports/shellcheck/summary.md
+          for script in "${SCRIPTS[@]}"; do
+            if grep -q "$script" reports/shellcheck/failed_scripts.txt 2>/dev/null; then
+              echo "- ❌ \`$script\` - Issues found" >> reports/shellcheck/summary.md
+            else
+              echo "- ✅ \`$script\` - No issues found" >> reports/shellcheck/summary.md
+            fi
+          done
+          
+          # Add overall status 
+          if [ -f "reports/shellcheck/failed_scripts.txt" ]; then
+            FAILED_COUNT=$(wc -l < reports/shellcheck/failed_scripts.txt)
+            echo "" >> reports/shellcheck/summary.md
+            echo "## Results" >> reports/shellcheck/summary.md
+            echo "**Failed scripts:** $FAILED_COUNT out of ${#SCRIPTS[@]}" >> reports/shellcheck/summary.md
+            echo "**Status:** ❌ Some scripts have ShellCheck issues" >> reports/shellcheck/summary.md
+          else
+            echo "" >> reports/shellcheck/summary.md
+            echo "## Results" >> reports/shellcheck/summary.md
+            echo "**Status:** ✅ All scripts passed ShellCheck validation" >> reports/shellcheck/summary.md
+          fi
+      
+      # Shellharden validation
+      - name: Run Shellharden
+        id: shellharden
+        continue-on-error: true
+        run: |
+          mkdir -p reports/shellharden
+          
+          # Check each script individually
+          SCRIPTS=(*.sh)
+          for script in "${SCRIPTS[@]}"; do
+            echo "Checking $script with Shellharden"
+            # Generate report of suggested changes
+            shellharden --syntax-suggest "$script" > "reports/shellharden/${script}.syntax.txt" || true
+            
+            # Run check for pass/fail status
+            if shellharden --check "$script" >/dev/null 2>&1; then
+              echo "✅ $script - Passed Shellharden check" >> reports/shellharden/status.txt
+            else
+              echo "❌ $script - Failed Shellharden check" >> reports/shellharden/status.txt
+              echo "$script" >> reports/shellharden/failed_scripts.txt
+              
+              # Generate diff of changes
+              (shellharden --transform "$script" | diff -u "$script" - > "reports/shellharden/${script}.diff") || true
+            fi
+          done
+          
+          # Generate summary report
+          echo "# Shellharden Validation Results" > reports/shellharden/summary.md
+          echo "Generated: $(date)" >> reports/shellharden/summary.md
+          echo "" >> reports/shellharden/summary.md
+          
+          echo "## Scripts Analyzed" >> reports/shellharden/summary.md
+          cat reports/shellharden/status.txt >> reports/shellharden/summary.md
+          
+          # Add overall status
+          if [ -f "reports/shellharden/failed_scripts.txt" ]; then
+            FAILED_COUNT=$(wc -l < reports/shellharden/failed_scripts.txt)
+            echo "" >> reports/shellharden/summary.md
+            echo "## Results" >> reports/shellharden/summary.md
+            echo "**Failed scripts:** $FAILED_COUNT out of ${#SCRIPTS[@]}" >> reports/shellharden/summary.md
+            echo "**Status:** ❌ Some scripts have unsafe variable usage or other issues detectable by Shellharden" >> reports/shellharden/summary.md
+          else
+            echo "" >> reports/shellharden/summary.md
+            echo "## Results" >> reports/shellharden/summary.md
+            echo "**Status:** ✅ All scripts passed Shellharden validation" >> reports/shellharden/summary.md
+          fi
+
+      # Bashate validation
+      - name: Run Bashate
+        id: bashate
+        continue-on-error: true
+        run: | 
+          mkdir -p reports/bashate
+          
+          # Check each script individually
+          SCRIPTS=(*.sh)
+          for script in "${SCRIPTS[@]}"; do
+            echo "Checking $script with Bashate"
+            # Run check and save to reports
+            bashate --max-line-length 120 "$script" > "reports/bashate/${script}.txt" || true
+            
+            # Save exit code for summary
+            if bashate --max-line-length 120 "$script" >/dev/null 2>&1; then
+              echo "✅ $script - Passed Bashate check" >> reports/bashate/status.txt
+            else
+              echo "❌ $script - Failed Bashate check" >> reports/bashate/status.txt
+              echo "$script" >> reports/bashate/failed_scripts.txt
+            fi
+          done
+          
+          # Generate summary report
+          echo "# Bashate Validation Results" > reports/bashate/summary.md
+          echo "Generated: $(date)" >> reports/bashate/summary.md
+          echo "" >> reports/bashate/summary.md
+          
+          echo "## Scripts Analyzed" >> reports/bashate/summary.md
+          cat reports/bashate/status.txt >> reports/bashate/summary.md
+          
+          # Add overall status
+          if [ -f "reports/bashate/failed_scripts.txt" ]; then
+            FAILED_COUNT=$(wc -l < reports/bashate/failed_scripts.txt)
+            echo "" >> reports/bashate/summary.md
+            echo "## Results" >> reports/bashate/summary.md
+            echo "**Failed scripts:** $FAILED_COUNT out of ${#SCRIPTS[@]}" >> reports/bashate/summary.md
+            echo "**Status:** ❌ Some scripts have style issues according to Bashate" >> reports/bashate/summary.md
+          else
+            echo "" >> reports/bashate/summary.md
+            echo "## Results" >> reports/bashate/summary.md
+            echo "**Status:** ✅ All scripts passed Bashate validation" >> reports/bashate/summary.md
+          fi
+
+      # Generate consolidated report
+      - name: Generate consolidated report
+        run: |
+          mkdir -p reports/consolidated
+          
+          echo "# Bash Script Validation Summary" > reports/consolidated/summary.md
+          echo "Generated: $(date)" >> reports/consolidated/summary.md
+          echo "" >> reports/consolidated/summary.md
+          
+          # Get overall results for each tool
+          SCRIPTS=(*.sh)
+          TOTAL_SCRIPTS=${#SCRIPTS[@]}
+          
+          # ShellCheck summary
+          echo "## ShellCheck Summary" >> reports/consolidated/summary.md
+          if [ -f "reports/shellcheck/failed_scripts.txt" ]; then
+            SHELLCHECK_FAILED=$(wc -l < reports/shellcheck/failed_scripts.txt)
+            SHELLCHECK_PASSED=$((TOTAL_SCRIPTS - SHELLCHECK_FAILED))
+            echo "**Result:** ❌ $SHELLCHECK_FAILED out of $TOTAL_SCRIPTS scripts failed" >> reports/consolidated/summary.md
+          else
+            echo "**Result:** ✅ All $TOTAL_SCRIPTS scripts passed" >> reports/consolidated/summary.md
+          fi
+          echo "" >> reports/consolidated/summary.md
+          
+          # Shellharden summary
+          echo "## Shellharden Summary" >> reports/consolidated/summary.md
+          if [ -f "reports/shellharden/failed_scripts.txt" ]; then
+            SHELLHARDEN_FAILED=$(wc -l < reports/shellharden/failed_scripts.txt)
+            SHELLHARDEN_PASSED=$((TOTAL_SCRIPTS - SHELLHARDEN_FAILED))
+            echo "**Result:** ❌ $SHELLHARDEN_FAILED out of $TOTAL_SCRIPTS scripts failed" >> reports/consolidated/summary.md
+          else
+            echo "**Result:** ✅ All $TOTAL_SCRIPTS scripts passed" >> reports/consolidated/summary.md
+          fi
+          echo "" >> reports/consolidated/summary.md
+          
+          # Bashate summary
+          echo "## Bashate Summary" >> reports/consolidated/summary.md
+          if [ -f "reports/bashate/failed_scripts.txt" ]; then
+            BASHATE_FAILED=$(wc -l < reports/bashate/failed_scripts.txt)
+            BASHATE_PASSED=$((TOTAL_SCRIPTS - BASHATE_FAILED))
+            echo "**Result:** ❌ $BASHATE_FAILED out of $TOTAL_SCRIPTS scripts failed" >> reports/consolidated/summary.md
+          else
+            echo "**Result:** ✅ All $TOTAL_SCRIPTS scripts passed" >> reports/consolidated/summary.md
+          fi
+          echo "" >> reports/consolidated/summary.md
+          
+          # Script-by-script results
+          echo "## Detailed Results by Script" >> reports/consolidated/summary.md
+          echo "" >> reports/consolidated/summary.md
+          echo "| Script | ShellCheck | Shellharden | Bashate |" >> reports/consolidated/summary.md
+          echo "|--------|------------|-------------|---------|" >> reports/consolidated/summary.md
+          
+          for script in "${SCRIPTS[@]}"; do
+            # Get status for each tool
+            if grep -q "$script" reports/shellcheck/failed_scripts.txt 2>/dev/null; then
+              SC_STATUS="❌"
+            else
+              SC_STATUS="✅"
+            fi
+            
+            if grep -q "$script" reports/shellharden/failed_scripts.txt 2>/dev/null; then
+              SH_STATUS="❌"
+            else
+              SH_STATUS="✅"
+            fi
+            
+            if grep -q "$script" reports/bashate/failed_scripts.txt 2>/dev/null; then
+              BA_STATUS="❌"
+            else
+              BA_STATUS="✅"
+            fi
+            
+            echo "| $script | $SC_STATUS | $SH_STATUS | $BA_STATUS |" >> reports/consolidated/summary.md
+          done
+          
+          # Add to workflow summary
+          cat reports/consolidated/summary.md >> $GITHUB_STEP_SUMMARY
+
+      # Upload all reports as artifacts
+      - name: Upload validation reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: bash-validation-reports
+          path: reports/
+          retention-days: 14
