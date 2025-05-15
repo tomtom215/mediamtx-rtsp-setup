@@ -1,617 +1,159 @@
 name: Shell Script Validation
 
+# Ensures workflow triggers on any push that includes shell scripts
+# or changes to the workflow file itself
 on:
   push:
     paths:
       - '**/*.sh'
+      - '**/bashrc'
+      - '**/profile'
+      - '.github/workflows/shell-validate.yml'
+    # No branch restrictions to ensure it runs on all branches
   pull_request:
     paths:
       - '**/*.sh'
+      - '**/bashrc'
+      - '**/profile'
+    # No branch restrictions for PRs to ensure broad coverage
+
+# Add debugging capability (uncomment when needed)
+# env:
+#   ACTIONS_RUNNER_DEBUG: true
+#   ACTIONS_STEP_DEBUG: true
 
 jobs:
+  # First check if any shell scripts were modified
+  # This avoids running the full workflow unnecessarily
+  detect-files:
+    name: Detect Shell Scripts
+    runs-on: ubuntu-latest
+    outputs:
+      shell_scripts: ${{ steps.filter.outputs.shell_scripts }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for proper file comparison
+      
+      - name: Filter relevant files
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            shell_scripts:
+              - '**/*.sh'
+              - '**/bashrc'
+              - '**/profile'
+              - 'scripts/**'
+
+  # Main validation job only runs if shell scripts were detected
   validate:
+    needs: detect-files
+    if: ${{ needs.detect-files.outputs.shell_scripts == 'true' }}
+    name: Validate Shell Scripts
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
-
+      
+      # Debug step to show environment (uncomment when troubleshooting)
+      # - name: Debug environment
+      #   run: |
+      #     echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
+      #     echo "GITHUB_REF: $GITHUB_REF"
+      #     find . -type f -name "*.sh" | sort
+      
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck jq
+          # ShellCheck is pre-installed on Ubuntu runners
+          # Install Python dependencies
           pip install bashate
-          cargo install shellharden || true  # Make installation optional
+          
+          # Install Rust and Cargo for Shellharden
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          source "$HOME/.cargo/env"
+          
+          # Install Shellharden
+          cargo install shellharden --version 4.3.0
+          
+          # Verify installations
+          echo "Verifying tool installations:"
+          shellcheck --version
+          bashate --version
+          shellharden --version
 
-      - name: Create parser script
+      - name: Run ShellCheck
+        id: shellcheck
+        continue-on-error: true
         run: |
-          cat > parse_validation.sh << 'EOF'
-          #!/bin/bash
-          set -eo pipefail
-
-          # Create output directory
-          output_dir=$(mktemp -d)
-          normalized_output="${output_dir}/normalized.jsonl"
-          touch "$normalized_output"
-
-          # ------- ShellCheck Parser -------
-          parse_shellcheck() {
-            local input_file="$1"
-            
-            # Extract comments array from ShellCheck output
-            jq -c '.comments[]' "$input_file" 2>/dev/null | while IFS='' read -r issue; do
-              # Extract basic information
-              local file line column level code message
-              
-              file=$(echo "$issue" | jq -r '.file')
-              line=$(echo "$issue" | jq -r '.line')
-              column=$(echo "$issue" | jq -r '.column')
-              level=$(echo "$issue" | jq -r '.level')
-              code=$(echo "$issue" | jq -r '.code')
-              message=$(echo "$issue" | jq -r '.message')
-              
-              # Get context if file exists
-              local context=""
-              if [[ -f "$file" ]]; then
-                # Get 2 lines before and after for context
-                local start_line=$((line > 2 ? line - 2 : 1))
-                local end_line=$((line + 2))
-                context=$(sed -n "${start_line},${end_line}p" "$file" | 
-                          sed "${start_line}s/^/  /;${start_line}s/^/$(($line-$start_line+1 == 1 ? '→ ' : '  '))/;
-                               $(($line-$start_line+2))s/^/  /;$(($line-$start_line+2))s/^/$(($line-$start_line+1 == 2 ? '→ ' : '  '))/;
-                               $(($line-$start_line+3))s/^/  /;$(($line-$start_line+3))s/^/$(($line-$start_line+1 == 3 ? '→ ' : '  '))/;
-                               $(($line-$start_line+4))s/^/  /;$(($line-$start_line+4))s/^/$(($line-$start_line+1 == 4 ? '→ ' : '  '))/;
-                               $(($line-$start_line+5))s/^/  /;$(($line-$start_line+5))s/^/$(($line-$start_line+1 == 5 ? '→ ' : '  '))/")
-              fi
-              
-              # Map ShellCheck severity to our categories
-              local severity
-              case "$level" in
-                "error")
-                  severity="critical"
-                  ;;
-                "warning")
-                  severity="error"
-                  ;;
-                "info")
-                  severity="warning"
-                  ;;
-                "style")
-                  severity="info"
-                  ;;
-                *)
-                  severity="unknown"
-                  ;;
-              esac
-              
-              # Output normalized JSON
-              jq -n \
-                --arg tool "shellcheck" \
-                --arg file "$file" \
-                --arg line "$line" \
-                --arg column "$column" \
-                --arg code "SC$code" \
-                --arg severity "$severity" \
-                --arg message "$message" \
-                --arg context "$context" \
-                '{"tool": $tool, "file": $file, "line": $line | tonumber, "column": $column | tonumber, "code": $code, "severity": $severity, "message": $message, "context": $context}'
-            done
-          }
-
-          # ------- Bashate Parser -------
-          parse_bashate() {
-            local input_file="$1"
-            
-            # Process line by line
-            while IFS='' read -r line; do
-              # Skip empty lines
-              [[ -z "$line" ]] && continue
-              
-              # Match Bashate output pattern: file:line:column: E### message
-              if [[ $line =~ ([^:]+):([0-9]+):([0-9]+):\ ([EW][0-9]{3})\ (.*) ]]; then
-                local file="${BASH_REMATCH[1]}"
-                local line_num="${BASH_REMATCH[2]}"
-                local column="${BASH_REMATCH[3]}"
-                local code="${BASH_REMATCH[4]}"
-                local message="${BASH_REMATCH[5]}"
-                
-                # Get context if file exists
-                local context=""
-                if [[ -f "$file" ]]; then
-                  local start_line=$((line_num > 2 ? line_num - 2 : 1))
-                  local end_line=$((line_num + 2))
-                  context=$(sed -n "${start_line},${end_line}p" "$file" | 
-                            sed "${start_line}s/^/  /;${start_line}s/^/$(($line_num-$start_line+1 == 1 ? '→ ' : '  '))/;
-                                 $(($line_num-$start_line+2))s/^/  /;$(($line_num-$start_line+2))s/^/$(($line_num-$start_line+1 == 2 ? '→ ' : '  '))/;
-                                 $(($line_num-$start_line+3))s/^/  /;$(($line_num-$start_line+3))s/^/$(($line_num-$start_line+1 == 3 ? '→ ' : '  '))/;
-                                 $(($line_num-$start_line+4))s/^/  /;$(($line_num-$start_line+4))s/^/$(($line_num-$start_line+1 == 4 ? '→ ' : '  '))/;
-                                 $(($line_num-$start_line+5))s/^/  /;$(($line_num-$start_line+5))s/^/$(($line_num-$start_line+1 == 5 ? '→ ' : '  '))/")
-                fi
-                
-                # Determine severity based on error code
-                local severity
-                if [[ $code == E* ]]; then
-                  severity="error"
-                else
-                  severity="warning"
-                fi
-                
-                # Output normalized JSON
-                jq -n \
-                  --arg tool "bashate" \
-                  --arg file "$file" \
-                  --arg line "$line_num" \
-                  --arg column "$column" \
-                  --arg code "$code" \
-                  --arg severity "$severity" \
-                  --arg message "$message" \
-                  --arg context "$context" \
-                  '{"tool": $tool, "file": $file, "line": $line | tonumber, "column": $column | tonumber, "code": $code, "severity": $severity, "message": $message, "context": $context}'
-              fi
-            done < "$input_file"
-          }
-
-          # ------- Shellharden Parser -------
-          parse_shellharden() {
-            local input_file="$1"
-            local files_processed=()
-            
-            # Process line by line to extract warnings
-            while IFS='' read -r line; do
-              for script in *.sh; do
-                if [[ -f "$script" ]] && [[ "$line" == *"$script"* ]] && [[ "$line" == *"needs hardening"* ]]; then
-                  # Extract filename
-                  local file="$script"
-                  
-                  # Add to processed files if not already there
-                  if [[ ! " ${files_processed[@]} " =~ " ${file} " ]]; then
-                    files_processed+=("$file")
-                    
-                    # Run shellharden with --check to get output
-                    local detail_output
-                    detail_output=$(shellharden --check "$file" 2>&1 || true)
-                    
-                    # Process shellharden output
-                    local line_num=0
-                    while IFS='' read -r detail_line; do
-                      if [[ "$detail_line" =~ line\ ([0-9]+): ]]; then
-                        line_num="${BASH_REMATCH[1]}"
-                        local message="${detail_line#*: }"
-                        
-                        # Get context if file exists
-                        local context=""
-                        if [[ -f "$file" ]]; then
-                          local start_line=$((line_num > 2 ? line_num - 2 : 1))
-                          local end_line=$((line_num + 2))
-                          context=$(sed -n "${start_line},${end_line}p" "$file" | 
-                                    sed "${start_line}s/^/  /;${start_line}s/^/$(($line_num-$start_line+1 == 1 ? '→ ' : '  '))/;
-                                         $(($line_num-$start_line+2))s/^/  /;$(($line_num-$start_line+2))s/^/$(($line_num-$start_line+1 == 2 ? '→ ' : '  '))/;
-                                         $(($line_num-$start_line+3))s/^/  /;$(($line_num-$start_line+3))s/^/$(($line_num-$start_line+1 == 3 ? '→ ' : '  '))/;
-                                         $(($line_num-$start_line+4))s/^/  /;$(($line_num-$start_line+4))s/^/$(($line_num-$start_line+1 == 4 ? '→ ' : '  '))/;
-                                         $(($line_num-$start_line+5))s/^/  /;$(($line_num-$start_line+5))s/^/$(($line_num-$start_line+1 == 5 ? '→ ' : '  '))/")
-                        fi
-                        
-                        # Create a code ID based on the message
-                        local code="SH-$(echo "$message" | tr -c '[:alnum:]' '-' | cut -c1-8 | tr '[:lower:]' '[:upper:]')"
-                        
-                        # Output normalized JSON
-                        jq -n \
-                          --arg tool "shellharden" \
-                          --arg file "$file" \
-                          --arg line "$line_num" \
-                          --arg column "1" \
-                          --arg code "$code" \
-                          --arg severity "warning" \
-                          --arg message "$message" \
-                          --arg context "$context" \
-                          '{"tool": $tool, "file": $file, "line": $line | tonumber, "column": $column | tonumber, "code": $code, "severity": $severity, "message": $message, "context": $context}'
-                      fi
-                    done <<< "$detail_output"
-                  fi
-                fi
-              done
-            done < "$input_file"
-          }
-
-          # ------- Main Script -------
-          main() {
-            # Get list of shell scripts
-            scripts=$(find . -type f -name "*.sh")
-            
-            # Create temporary files for tool outputs
-            shellcheck_output=$(mktemp)
-            bashate_output=$(mktemp)
-            shellharden_output=$(mktemp)
-            
-            echo "Running ShellCheck..."
-            shellcheck -f json $scripts > "$shellcheck_output" 2>/dev/null || true
-            parse_shellcheck "$shellcheck_output" >> "$normalized_output"
-            
-            echo "Running Bashate..."
-            bashate $scripts > "$bashate_output" 2>/dev/null || true
-            parse_bashate "$bashate_output" >> "$normalized_output"
-            
-            echo "Running Shellharden..."
-            for script in $scripts; do
-              shellharden --check "$script" >> "$shellharden_output" 2>&1 || true
-            done
-            parse_shellharden "$shellharden_output" >> "$normalized_output"
-            
-            echo "Generating report..."
-            generate_report "$normalized_output"
-            
-            # Cleanup temporary files
-            rm -f "$shellcheck_output" "$bashate_output" "$shellharden_output"
-          }
-
-          # ------- Report Generation -------
-          generate_report() {
-            local input_file="$1"
-            
-            # Count issues by severity
-            local critical_count=$(grep -c '"severity":"critical"' "$input_file" || echo 0)
-            local error_count=$(grep -c '"severity":"error"' "$input_file" || echo 0)
-            local warning_count=$(grep -c '"severity":"warning"' "$input_file" || echo 0)
-            local info_count=$(grep -c '"severity":"info"' "$input_file" || echo 0)
-            local total_count=$((critical_count + error_count + warning_count + info_count))
-            
-            # Count scripts with issues
-            local scripts_with_issues=$(jq -r '.file' "$input_file" 2>/dev/null | sort -u | wc -l)
-            local total_scripts=$(find . -type f -name "*.sh" | wc -l)
-            
-            # Generate the report header
-            {
-              echo "# Shell Script Validation Results"
-              echo
-              echo "## 📊 Summary Dashboard"
-              echo
-              echo "| Category | Count | Status |"
-              echo "|----------|-------|--------|"
-              echo "| Scripts Analyzed | $total_scripts | ✅ |"
-              echo "| Scripts with Issues | $scripts_with_issues | $([ "$scripts_with_issues" -gt 0 ] && echo "⚠️" || echo "✅") |"
-              echo "| Total Issues | $total_count | $([ "$total_count" -gt 0 ] && echo "⚠️" || echo "✅") |"
-              echo "| Critical Errors | $critical_count | $([ "$critical_count" -gt 0 ] && echo "🔴" || echo "✅") |"
-              echo "| Errors | $error_count | $([ "$error_count" -gt 0 ] && echo "🟠" || echo "✅") |"
-              echo "| Warnings | $warning_count | $([ "$warning_count" -gt 0 ] && echo "🟡" || echo "✅") |"
-              echo "| Info | $info_count | 🔵 |"
-              echo
-            } > "${output_dir}/report.md"
-            
-            # Generate critical issues report if any exist
-            if [ "$critical_count" -gt 0 ]; then
-              {
-                echo "## 🚨 Critical Issues ($critical_count)"
-                echo
-                echo "<details>"
-                echo "<summary><strong>💣 Issues that could cause data loss, security vulnerabilities, or system failures</strong></summary>"
-                echo
-                echo "| Script | Line | Tool | Code | Message |"
-                echo "|--------|------|------|------|---------|"
-                
-                # Extract critical issues
-                grep '"severity":"critical"' "$input_file" | while IFS='' read -r issue; do
-                  local file=$(echo "$issue" | jq -r '.file')
-                  local file_base=$(basename "$file")
-                  local line=$(echo "$issue" | jq -r '.line')
-                  local tool=$(echo "$issue" | jq -r '.tool')
-                  local code=$(echo "$issue" | jq -r '.code')
-                  local message=$(echo "$issue" | jq -r '.message')
-                  local context=$(echo "$issue" | jq -r '.context')
-                  
-                  echo "| $file_base | $line | $tool | $code | 🔴 $message |"
-                done
-                echo
-                
-                # Add code context for critical issues
-                echo "### Code Context for Critical Issues"
-                echo
-                grep '"severity":"critical"' "$input_file" | while IFS='' read -r issue; do
-                  local file=$(echo "$issue" | jq -r '.file')
-                  local file_base=$(basename "$file")
-                  local line=$(echo "$issue" | jq -r '.line')
-                  local tool=$(echo "$issue" | jq -r '.tool')
-                  local code=$(echo "$issue" | jq -r '.code')
-                  local message=$(echo "$issue" | jq -r '.message')
-                  local context=$(echo "$issue" | jq -r '.context')
-                  
-                  echo "#### $code in $file_base:$line"
-                  echo
-                  echo "**$message**"
-                  echo
-                  echo '```bash'
-                  echo "$context"
-                  echo '```'
-                  echo
-                done
-                
-                echo "</details>"
-                echo
-              } >> "${output_dir}/report.md"
-            fi
-            
-            # Generate errors report if any exist
-            if [ "$error_count" -gt 0 ]; then
-              {
-                echo "## ⚠️ Errors ($error_count)"
-                echo
-                echo "<details>"
-                echo "<summary><strong>🟠 Issues that will likely cause incorrect behavior</strong></summary>"
-                echo
-                echo "| Script | Line | Tool | Code | Message |"
-                echo "|--------|------|------|------|---------|"
-                
-                # Extract error issues
-                grep '"severity":"error"' "$input_file" | while IFS='' read -r issue; do
-                  local file=$(echo "$issue" | jq -r '.file')
-                  local file_base=$(basename "$file")
-                  local line=$(echo "$issue" | jq -r '.line')
-                  local tool=$(echo "$issue" | jq -r '.tool')
-                  local code=$(echo "$issue" | jq -r '.code')
-                  local message=$(echo "$issue" | jq -r '.message')
-                  
-                  echo "| $file_base | $line | $tool | $code | $message |"
-                done
-                
-                echo
-                echo "</details>"
-                echo
-              } >> "${output_dir}/report.md"
-            fi
-            
-            # Generate warnings report if any exist
-            if [ "$warning_count" -gt 0 ]; then
-              {
-                echo "## Warnings ($warning_count)"
-                echo
-                echo "<details>"
-                echo "<summary><strong>🟡 Issues that might cause problems in certain situations</strong></summary>"
-                echo
-                echo "| Script | Line | Tool | Code | Message |"
-                echo "|--------|------|------|------|---------|"
-                
-                # Extract warning issues
-                grep '"severity":"warning"' "$input_file" | while IFS='' read -r issue; do
-                  local file=$(echo "$issue" | jq -r '.file')
-                  local file_base=$(basename "$file")
-                  local line=$(echo "$issue" | jq -r '.line')
-                  local tool=$(echo "$issue" | jq -r '.tool')
-                  local code=$(echo "$issue" | jq -r '.code')
-                  local message=$(echo "$issue" | jq -r '.message')
-                  
-                  echo "| $file_base | $line | $tool | $code | $message |"
-                done
-                
-                echo
-                echo "</details>"
-                echo
-              } >> "${output_dir}/report.md"
-            fi
-            
-            # Generate info report if any exist
-            if [ "$info_count" -gt 0 ]; then
-              {
-                echo "## Information ($info_count)"
-                echo
-                echo "<details>"
-                echo "<summary><strong>🔵 Style suggestions and informational messages</strong></summary>"
-                echo
-                echo "| Script | Line | Tool | Code | Message |"
-                echo "|--------|------|------|------|---------|"
-                
-                # Extract info issues
-                grep '"severity":"info"' "$input_file" | while IFS='' read -r issue; do
-                  local file=$(echo "$issue" | jq -r '.file')
-                  local file_base=$(basename "$file")
-                  local line=$(echo "$issue" | jq -r '.line')
-                  local tool=$(echo "$issue" | jq -r '.tool')
-                  local code=$(echo "$issue" | jq -r '.code')
-                  local message=$(echo "$issue" | jq -r '.message')
-                  
-                  echo "| $file_base | $line | $tool | $code | $message |"
-                done
-                
-                echo
-                echo "</details>"
-                echo
-              } >> "${output_dir}/report.md"
-            fi
-            
-            # Generate issues by script
-            {
-              echo "## 📑 Issues by Script"
-              echo
-              
-              # Get unique script files with issues
-              jq -r '.file' "$input_file" 2>/dev/null | sort -u | while IFS='' read -r file; do
-                local file_base=$(basename "$file")
-                local file_issues=$(grep "\"file\":\"$file\"" "$input_file" | wc -l)
-                
-                # Get counts by severity for this file
-                local file_critical=$(grep "\"file\":\"$file\"" "$input_file" | grep -c '"severity":"critical"' || echo 0)
-                local file_errors=$(grep "\"file\":\"$file\"" "$input_file" | grep -c '"severity":"error"' || echo 0)
-                local file_warnings=$(grep "\"file\":\"$file\"" "$input_file" | grep -c '"severity":"warning"' || echo 0)
-                local file_info=$(grep "\"file\":\"$file\"" "$input_file" | grep -c '"severity":"info"' || echo 0)
-                
-                echo "<details>"
-                echo "<summary><strong>$file_base ($file_issues issues)</strong></summary>"
-                echo
-                
-                # Critical issues for this file
-                if [ "$file_critical" -gt 0 ]; then
-                  echo "### Critical ($file_critical)"
-                  grep "\"file\":\"$file\"" "$input_file" | grep '"severity":"critical"' | while IFS='' read -r issue; do
-                    local line=$(echo "$issue" | jq -r '.line')
-                    local code=$(echo "$issue" | jq -r '.code')
-                    local message=$(echo "$issue" | jq -r '.message')
-                    local context=$(echo "$issue" | jq -r '.context')
-                    
-                    echo "- **Line $line** - $code: $message"
-                    echo "  ```bash"
-                    echo "$context"
-                    echo "  ```"
-                    echo
-                  done
-                fi
-                
-                # Error issues for this file
-                if [ "$file_errors" -gt 0 ]; then
-                  echo "### Errors ($file_errors)"
-                  grep "\"file\":\"$file\"" "$input_file" | grep '"severity":"error"' | while IFS='' read -r issue; do
-                    local line=$(echo "$issue" | jq -r '.line')
-                    local code=$(echo "$issue" | jq -r '.code')
-                    local message=$(echo "$issue" | jq -r '.message')
-                    
-                    echo "- **Line $line** - $code: $message"
-                  done
-                  echo
-                fi
-                
-                # Warning issues for this file
-                if [ "$file_warnings" -gt 0 ]; then
-                  echo "### Warnings ($file_warnings)"
-                  grep "\"file\":\"$file\"" "$input_file" | grep '"severity":"warning"' | while IFS='' read -r issue; do
-                    local line=$(echo "$issue" | jq -r '.line')
-                    local code=$(echo "$issue" | jq -r '.code')
-                    local message=$(echo "$issue" | jq -r '.message')
-                    
-                    echo "- **Line $line** - $code: $message"
-                  done
-                  echo
-                fi
-                
-                # Info issues for this file
-                if [ "$file_info" -gt 0 ]; then
-                  echo "### Info ($file_info)"
-                  grep "\"file\":\"$file\"" "$input_file" | grep '"severity":"info"' | while IFS='' read -r issue; do
-                    local line=$(echo "$issue" | jq -r '.line')
-                    local code=$(echo "$issue" | jq -r '.code')
-                    local message=$(echo "$issue" | jq -r '.message')
-                    
-                    echo "- **Line $line** - $code: $message"
-                  done
-                  echo
-                fi
-                
-                echo "</details>"
-                echo
-              done
-            } >> "${output_dir}/report.md"
-            
-            # Generate recommendations section
-            {
-              echo "## 💡 Recommendations for Backlog Items"
-              echo
-              
-              if [ "$critical_count" -gt 0 ]; then
-                echo "### High Priority Tasks"
-                echo
-                echo "Create backlog items to address these critical issues immediately:"
-                echo
-                grep '"severity":"critical"' "$input_file" | while IFS='' read -r issue; do
-                  local file=$(echo "$issue" | jq -r '.file')
-                  local file_base=$(basename "$file")
-                  local line=$(echo "$issue" | jq -r '.line')
-                  local code=$(echo "$issue" | jq -r '.code')
-                  local message=$(echo "$issue" | jq -r '.message')
-                  
-                  echo "- Fix $code in $file_base:$line - $message"
-                done
-                echo
-              fi
-              
-              if [ "$error_count" -gt 0 ]; then
-                echo "### Medium Priority Tasks"
-                echo
-                echo "Address these errors in the next development cycle:"
-                echo
-                # Show the top 5 errors only to avoid overwhelming
-                grep '"severity":"error"' "$input_file" | head -5 | while IFS='' read -r issue; do
-                  local file=$(echo "$issue" | jq -r '.file')
-                  local file_base=$(basename "$file")
-                  local line=$(echo "$issue" | jq -r '.line')
-                  local code=$(echo "$issue" | jq -r '.code')
-                  local message=$(echo "$issue" | jq -r '.message')
-                  
-                  echo "- Fix $code in $file_base:$line - $message"
-                done
-                
-                if [ "$error_count" -gt 5 ]; then
-                  echo "- ... and $(($error_count - 5)) more error issues"
-                fi
-                echo
-              fi
-              
-              # Add some general recommendations
-              echo "### General Improvements"
-              echo
-              echo "Consider these additional tasks to improve shell script quality:"
-              echo
-              echo "- Create a shell script style guide for the team"
-              echo "- Set up pre-commit hooks with ShellCheck"
-              echo "- Address warnings proactively during development"
-              echo "- Add shellcheck disable comments for intentional non-compliant code"
-              echo
-              
-              # Add helpful resources
-              echo "## 📚 Reference Resources"
-              echo
-              echo "- [ShellCheck Wiki](https://www.shellcheck.net/wiki/) - Detailed explanation of error codes"
-              echo "- [Google Shell Style Guide](https://google.github.io/styleguide/shellguide.html) - Best practices for shell scripts"
-              echo "- [Bash Pitfalls](https://mywiki.wooledge.org/BashPitfalls) - Common issues in shell scripts"
-              echo
-              
-              # Add generation timestamp
-              echo "## 📅 Generated: $(date -u)"
-            } >> "${output_dir}/report.md"
-            
-            # Output the report to GITHUB_STEP_SUMMARY
-            cat "${output_dir}/report.md" >> "$GITHUB_STEP_SUMMARY"
-          }
-
-          # Run main function
-          main
-          EOF
-
-          chmod +x parse_validation.sh
-
-      - name: Run script validation
-        id: validation
-        continue-on-error: true  # Don't fail the workflow if scripts have issues
+          echo "Running ShellCheck validation..."
+          # Using find to locate all shell scripts
+          SCRIPTS=$(find . -type f -name "*.sh" -o -name "bashrc" -o -name "profile")
+          
+          if [ -z "$SCRIPTS" ]; then
+            echo "No shell scripts found to validate."
+            exit 0
+          fi
+          
+          # Run ShellCheck with detailed output
+          echo "$SCRIPTS" | xargs shellcheck -x
+      
+      - name: Run Shellharden
+        id: shellharden
+        continue-on-error: true
         run: |
-          ./parse_validation.sh
-
-      - name: Create GitHub annotations for critical issues
-        run: |
-          # Find all critical issues and create GitHub annotations
-          grep '"severity":"critical"' $(find /tmp -name "normalized.jsonl" -type f) 2>/dev/null | while IFS='' read -r issue; do
-            file=$(echo "$issue" | jq -r '.file')
-            line=$(echo "$issue" | jq -r '.line')
-            column=$(echo "$issue" | jq -r '.column')
-            code=$(echo "$issue" | jq -r '.code')
-            message=$(echo "$issue" | jq -r '.message')
-            
-            # Create GitHub annotation
-            echo "::error file=${file},line=${line},col=${column}::${code}: ${message}"
+          echo "Running Shellharden validation..."
+          # Find all shell scripts
+          find . -type f -name "*.sh" -o -name "bashrc" -o -name "profile" | while read -r file; do
+            echo "Checking $file"
+            shellharden --check "$file" || echo "::warning file=$file::Shellharden found issues"
           done
-
-      - name: Create GitHub annotations for errors
+      
+      - name: Run Bashate
+        id: bashate
+        continue-on-error: true
         run: |
-          # Find all error issues and create GitHub annotations
-          grep '"severity":"error"' $(find /tmp -name "normalized.jsonl" -type f) 2>/dev/null | while IFS='' read -r issue; do
-            file=$(echo "$issue" | jq -r '.file')
-            line=$(echo "$issue" | jq -r '.line')
-            column=$(echo "$issue" | jq -r '.column')
-            code=$(echo "$issue" | jq -r '.code')
-            message=$(echo "$issue" | jq -r '.message')
-            
-            # Create GitHub annotation
-            echo "::warning file=${file},line=${line},col=${column}::${code}: ${message}"
+          echo "Running Bashate validation..."
+          # Find all shell scripts
+          find . -type f -name "*.sh" -o -name "bashrc" -o -name "profile" | while read -r file; do
+            echo "Checking $file"
+            bashate -i E006 "$file" || echo "::warning file=$file::Bashate found issues"
           done
-
-      - name: Save report as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: shell-script-validation-report
-          path: |
-            /tmp/*/report.md
-            /tmp/*/normalized.jsonl
-          retention-days: 7
+      
+      # Collect all results and fail if any validator failed
+      - name: Consolidate validation results
+        run: |
+          echo "Consolidating validation results..."
+          
+          # Check if any validator failed
+          if [ "${{ steps.shellcheck.outcome }}" == "failure" ]; then
+            echo "::error::ShellCheck found issues that need to be fixed"
+            FAILED=true
+          fi
+          
+          if [ "${{ steps.shellharden.outcome }}" == "failure" ]; then
+            echo "::error::Shellharden found issues that need to be fixed"
+            FAILED=true
+          fi
+          
+          if [ "${{ steps.bashate.outcome }}" == "failure" ]; then
+            echo "::error::Bashate found issues that need to be fixed"
+            FAILED=true
+          fi
+          
+          # Exit with failure if any validator failed
+          if [ "${FAILED:-false}" == "true" ]; then
+            echo "Shell script validation failed. Please fix the issues above."
+            exit 1
+          else
+            echo "All shell script validations passed!"
+          fi
+      
+      # Optional: Interactive debugging session if needed
+      # Uncomment this step when you need to debug workflow issues
+      # - name: Setup Debug Session
+      #   if: ${{ failure() }}
+      #   uses: mxschmitt/action-tmate@v3
+      #   with:
+      #     limit-access-to-actor: true
