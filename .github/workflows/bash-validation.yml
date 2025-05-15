@@ -11,7 +11,7 @@ jobs:
         run: |
           # ShellCheck is pre-installed on Ubuntu runners
           pip install bashate
-          cargo install shellharden || echo "Failed to install Shellharden, continuing anyway"
+          cargo install shellharden || echo "Warning: Shellharden installation may have had issues, continuing anyway"
       
       - name: Run validation tools
         run: |
@@ -211,8 +211,10 @@ jobs:
             declare -A SHELLHARDEN_FILES
             
             while IFS= read -r line; do
-              if [[ $line =~ (.*) would be rewritten ]]; then
-                FILE="${BASH_REMATCH[1]}"
+              # Fixed regex pattern for Shellharden output
+              if [[ $line =~ .*would\ be\ rewritten ]]; then
+                # Extract the file path using sed instead of regex capture
+                FILE=$(echo "$line" | sed -E 's/ would be rewritten.*//')
                 
                 if [ -z "${SHELLHARDEN_FILES[$FILE]}" ]; then
                   SHELLHARDEN_FILES[$FILE]=1
@@ -230,7 +232,7 @@ jobs:
               echo "<h2>$FILE (Shellharden)</h2>" >> validation-report.html
               echo "<div class='issue warning'>" >> validation-report.html
               echo "<div class='issue-location'>Found ${SHELLHARDEN_FILES[$FILE]} quoting issues</div>" >> validation-report.html
-              echo "<p>Shellharden detected improper variable quoting. Run with <code>shellharden --transform $FILE</code> to see suggested fixes.</p>" >> validation-report.html 
+              echo "<p>Shellharden detected improper variable quoting. Run with <code>shellharden --transform \"$FILE\"</code> to see suggested fixes.</p>" >> validation-report.html 
               echo "</div>" >> validation-report.html
               echo "</div>" >> validation-report.html
             done
